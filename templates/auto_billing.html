@@ -1,0 +1,303 @@
+{% extends 'base.html' %}
+{% block title %}Auto Billing{% endblock %}
+{% block page_title %}Auto Billing{% endblock %}
+
+{% block topbar_actions %}
+<a href="{{ url_for('invoices') }}" class="btn-outline-custom"><i class="bi bi-arrow-left"></i> Invoices</a>
+{% endblock %}
+
+{% block head %}
+<style>
+.ab-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:start;}
+@media(max-width:900px){.ab-grid{grid-template-columns:1fr;}}
+.ab-card{background:white;border:1px solid var(--border);border-radius:var(--radius);overflow:hidden;margin-bottom:14px;}
+.ab-head{padding:13px 18px;border-bottom:1px solid var(--border);background:#f8fafc;
+         display:flex;align-items:center;gap:8px;font-weight:800;font-size:14px;}
+.ab-body{padding:16px 18px;}
+.fg{display:flex;flex-direction:column;gap:4px;margin-bottom:12px;}
+.fg label{font-size:11px;font-weight:800;color:var(--text-muted);text-transform:uppercase;}
+.fg input,.fg select{padding:8px 12px;border:1.5px solid var(--border);border-radius:9px;
+  font-family:var(--font-body);font-size:13.5px;outline:none;}
+.fg input:focus,.fg select:focus{border-color:var(--accent);}
+.fg-row{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
+.prod-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:6px;max-height:220px;overflow-y:auto;}
+.prod-chip{padding:7px 10px;border:1.5px solid var(--border);border-radius:8px;
+           cursor:pointer;font-size:12.5px;display:flex;align-items:center;gap:6px;
+           background:white;transition:all .15s;}
+.prod-chip:hover,.prod-chip.sel{border-color:var(--accent);background:#eff6ff;color:var(--accent);}
+.prod-chip input{margin:0;}
+.buyer-chip{padding:6px 10px;border:1.5px solid var(--border);border-radius:8px;
+            font-size:12.5px;display:flex;align-items:center;gap:6px;
+            background:#f8fafc;margin-bottom:6px;}
+.buyer-chip i{color:#059669;}
+
+/* Preview table */
+.prev-tbl{width:100%;border-collapse:collapse;font-size:12.5px;}
+.prev-tbl th{background:var(--accent);color:white;padding:7px 10px;text-align:left;font-weight:700;}
+.prev-tbl td{padding:7px 10px;border-bottom:1px solid #f1f5f9;}
+.prev-tbl tr:hover td{background:#f8fafc;}
+.prev-tbl .amount{font-weight:700;color:var(--accent);text-align:right;}
+.badge-day{padding:2px 8px;border-radius:99px;background:#eff6ff;color:#1e40af;font-size:11px;font-weight:700;}
+
+/* Stat boxes */
+.stat-boxes{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:16px;}
+.stat-box{background:white;border:1px solid var(--border);border-radius:10px;padding:12px 14px;text-align:center;}
+.stat-box-val{font-family:var(--font-head);font-size:20px;font-weight:800;color:var(--accent);}
+.stat-box-lbl{font-size:11px;color:var(--text-muted);margin-top:2px;}
+</style>
+{% endblock %}
+
+{% block content %}
+
+<!-- Flash messages -->
+{% with msgs = get_flashed_messages(with_categories=true) %}
+{% for cat, msg in msgs %}
+<div class="alert alert-{{ 'success' if cat=='success' else 'danger' if cat=='danger' else 'warning' }}" style="margin:0 0 14px;">{{ msg }}</div>
+{% endfor %}
+{% endwith %}
+
+{% if not preview %}
+<!-- ── SETTINGS FORM ──────────────────────────────────────────── -->
+<form method="POST" action="{{ url_for('auto_billing') }}" id="abForm">
+<div class="ab-grid">
+
+  <!-- LEFT: Products + Buyers -->
+  <div>
+    <div class="ab-card">
+      <div class="ab-head"><i class="bi bi-box-seam" style="color:#059669;"></i> Products Select Karein</div>
+      <div class="ab-body">
+        <input type="text" id="prodSearch" placeholder="Product search..."
+               style="width:100%;padding:7px 12px;border:1.5px solid var(--border);
+                      border-radius:8px;font-size:13px;margin-bottom:10px;outline:none;"
+               oninput="filterProds(this.value)" />
+        <div style="display:flex;gap:8px;margin-bottom:8px;">
+          <button type="button" onclick="selAll()" style="padding:4px 12px;border:1.5px solid var(--accent);
+            border-radius:6px;font-size:12px;font-weight:700;color:var(--accent);background:#eff6ff;cursor:pointer;">
+            Select All
+          </button>
+          <button type="button" onclick="selNone()" style="padding:4px 12px;border:1.5px solid var(--border);
+            border-radius:6px;font-size:12px;font-weight:700;color:#475569;background:white;cursor:pointer;">
+            Clear All
+          </button>
+        </div>
+        <div class="prod-grid" id="prodGrid">
+          {% for p in products %}
+          <label class="prod-chip" id="pc_{{ p.id }}">
+            <input type="checkbox" name="product_ids" value="{{ p.id }}" checked
+                   onchange="this.closest('.prod-chip').classList.toggle('sel', this.checked)" />
+            <span>{{ p.name }}<br><small style="color:var(--text-muted);">₹{{ '%.0f'|format(p.selling_price or p.rate or 0) }} · GST {{ p.gst_rate }}%</small></span>
+          </label>
+          {% endfor %}
+        </div>
+      </div>
+    </div>
+
+    <div class="ab-card">
+      <div class="ab-head"><i class="bi bi-people" style="color:#7c3aed;"></i> Auto-Billing Buyers</div>
+      <div class="ab-body">
+        {% if buyers %}
+          {% for b in buyers %}
+          <div class="buyer-chip">
+            <i class="bi bi-check-circle-fill"></i>
+            <span style="font-weight:600;">{{ b.name }}</span>
+            <span style="color:var(--text-muted);font-size:11.5px;margin-left:auto;">{{ b.state or '' }}</span>
+          </div>
+          {% endfor %}
+          <div style="font-size:12px;color:var(--text-muted);margin-top:8px;">
+            <i class="bi bi-info-circle me-1"></i>
+            Buyers enable karne ke liye: Buyers → Edit → Auto Billing toggle ON karein.
+          </div>
+        {% else %}
+          <div style="text-align:center;padding:20px;color:var(--text-muted);">
+            <i class="bi bi-exclamation-circle" style="font-size:28px;display:block;margin-bottom:8px;"></i>
+            Koi buyer enabled nahi.<br>
+            <a href="{{ url_for('buyers') }}" style="color:var(--accent);">Buyers page pe jaayein →</a>
+          </div>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+
+  <!-- RIGHT: Settings -->
+  <div>
+    <div class="ab-card">
+      <div class="ab-head"><i class="bi bi-calendar-range" style="color:#2563eb;"></i> Date Range</div>
+      <div class="ab-body">
+        {% if last_inv_date %}
+        <div style="background:#fffbeb;border:1px solid #fde68a;border-radius:8px;
+                    padding:8px 12px;font-size:12px;color:#78350f;margin-bottom:10px;">
+          <i class="bi bi-info-circle me-1"></i>
+          Last invoice date: <b>{{ last_inv_date }}</b> — Start date iske baad honi chahiye.
+        </div>
+        {% endif %}
+        <div class="fg-row">
+          <div class="fg">
+            <label>From Date</label>
+            <input type="date" name="start_date" required
+                   {% if last_inv_date %}min="{{ last_inv_date }}"{% endif %}
+                   title="{% if last_inv_date %}Last invoice: {{ last_inv_date }} — iske baad date select karein{% endif %}" />
+          </div>
+          <div class="fg">
+            <label>To Date</label>
+            <input type="date" name="end_date" required
+                   {% if last_inv_date %}min="{{ last_inv_date }}"{% endif %} />
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="ab-card">
+      <div class="ab-head"><i class="bi bi-sliders" style="color:#dc2626;"></i> Bill Constraints</div>
+      <div class="ab-body">
+        <div class="fg-row">
+          <div class="fg"><label>Bills per Day (Min)</label>
+            <input type="number" name="min_per_day" value="1" min="1" max="50" required /></div>
+          <div class="fg"><label>Bills per Day (Max)</label>
+            <input type="number" name="max_per_day" value="3" min="1" max="50" required /></div>
+        </div>
+        <div class="fg-row">
+          <div class="fg"><label>Items per Invoice (Min)</label>
+            <input type="number" name="min_items" value="1" min="1" max="20" required /></div>
+          <div class="fg"><label>Items per Invoice (Max)</label>
+            <input type="number" name="max_items" value="3" min="1" max="20" required /></div>
+        </div>
+        <div class="fg-row">
+          <div class="fg"><label>Max Amount per Bill (₹)</label>
+            <input type="number" name="max_per_bill" value="10000" min="100" step="100" required /></div>
+          <div class="fg"><label>Total Cap (₹)</label>
+            <input type="number" name="total_cap" value="100000" min="100" step="1000" required /></div>
+        </div>
+        <div class="fg"><label>Payment Mode</label>
+          <select name="payment_mode">
+            <option value="Cash">Cash</option>
+            <option value="Credit">Credit</option>
+            <option value="UPI">UPI</option>
+            <option value="Bank Transfer">Bank Transfer</option>
+          </select>
+        </div>
+      </div>
+    </div>
+
+    <!-- Action Buttons -->
+    <div style="display:flex;gap:10px;">
+      <button type="submit" name="dry_run" value="1" class="btn-outline-custom" style="flex:1;justify-content:center;">
+        <i class="bi bi-eye"></i> Preview (Dry Run)
+      </button>
+      <button type="submit" name="dry_run" value="0" id="genBtn" class="btn-primary-custom"
+              style="flex:2;justify-content:center;background:#dc2626;border-color:#dc2626;"
+              onclick="return confirm('{{ buyers|length }} buyers ke liye invoices generate honge. Confirm?')">
+        <i class="bi bi-lightning-fill"></i> Generate Bills
+      </button>
+    </div>
+    <div style="margin-top:10px;background:#fef2f2;border:1px solid #fecaca;border-radius:8px;
+                padding:10px 12px;font-size:12px;color:#7f1d1d;">
+      <i class="bi bi-exclamation-triangle me-1"></i>
+      <b>Note:</b> Generate karne se pehle Preview zaroor dekhein.
+      Yah action undo nahi hogi (sirf cancel invoice kar sakte ho baad mein).
+    </div>
+  </div>
+
+</div>
+</form>
+
+{% else %}
+<!-- ── PREVIEW ────────────────────────────────────────────────── -->
+<div class="stat-boxes">
+  <div class="stat-box"><div class="stat-box-val">{{ invoice_count }}</div><div class="stat-box-lbl">Total Invoices</div></div>
+  <div class="stat-box"><div class="stat-box-val">₹{{ '{:,.0f}'.format(total_amount) }}</div><div class="stat-box-lbl">Total Amount</div></div>
+  <div class="stat-box"><div class="stat-box-val">{{ preview|map(attribute='invoice_date')|unique|list|length }}</div><div class="stat-box-lbl">Days</div></div>
+  <div class="stat-box"><div class="stat-box-val">{{ (total_amount / invoice_count)|round(0)|int }}</div><div class="stat-box-lbl">Avg per Bill</div></div>
+</div>
+
+<div class="ab-card">
+  <div class="ab-head"><i class="bi bi-eye" style="color:#2563eb;"></i> Preview — {{ invoice_count }} Invoices
+    <div style="margin-left:auto;display:flex;gap:8px;">
+      <a href="{{ url_for('auto_billing') }}" class="btn-outline-custom" style="padding:5px 14px;font-size:12.5px;">
+        <i class="bi bi-arrow-left"></i> Back
+      </a>
+    </div>
+  </div>
+  <div style="overflow-x:auto;">
+    <table class="prev-tbl">
+      <thead>
+        <tr><th>Date</th><th>Buyer</th><th>Items</th><th>Grand Total</th><th>Mode</th></tr>
+      </thead>
+      <tbody>
+        {% for inv in preview %}
+        <tr>
+          <td><span class="badge-day">{{ inv.invoice_date }}</span></td>
+          <td style="font-weight:600;">{{ inv.buyer_name }}</td>
+          <td style="color:var(--text-muted);">
+            {% for it in inv.items %}{{ it.description }} ×{{ it.quantity }}{% if not loop.last %}, {% endif %}{% endfor %}
+          </td>
+          <td class="amount">₹{{ '{:,.2f}'.format(inv.grand_total) }}</td>
+          <td>{{ inv.payment_mode }}</td>
+        </tr>
+        {% endfor %}
+        <tr style="background:#f8fafc;font-weight:800;">
+          <td colspan="3">TOTAL</td>
+          <td class="amount">₹{{ '{:,.2f}'.format(total_amount) }}</td>
+          <td></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div style="display:flex;gap:10px;margin-top:14px;">
+  <a href="{{ url_for('auto_billing') }}" class="btn-outline-custom" style="flex:1;justify-content:center;">
+    <i class="bi bi-x"></i> Cancel
+  </a>
+  <form method="POST" action="{{ url_for('auto_billing') }}" style="flex:2;display:flex;">
+    <input type="hidden" name="confirm_save" value="1" />
+    <button type="submit" class="btn-primary-custom"
+            style="flex:1;justify-content:center;background:#dc2626;border-color:#dc2626;"
+            onclick="return confirm('{{ invoice_count }} invoices generate karein?')">
+      <i class="bi bi-lightning-fill"></i> Confirm — {{ invoice_count }} Bills Save Karein
+    </button>
+  </form>
+</div>
+{% endif %}
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+// Product search + select all/none
+function filterProds(q) {
+  document.querySelectorAll('.prod-chip').forEach(el => {
+    const txt = el.textContent.toLowerCase();
+    el.style.display = (!q || txt.includes(q.toLowerCase())) ? '' : 'none';
+  });
+}
+function selAll() {
+  document.querySelectorAll('.prod-chip input[type=checkbox]').forEach(cb => {
+    cb.checked = true; cb.closest('.prod-chip').classList.add('sel');
+  });
+}
+function selNone() {
+  document.querySelectorAll('.prod-chip input[type=checkbox]').forEach(cb => {
+    cb.checked = false; cb.closest('.prod-chip').classList.remove('sel');
+  });
+}
+document.querySelectorAll('.prod-chip input:checked').forEach(cb =>
+  cb.closest('.prod-chip').classList.add('sel')
+);
+function goBack() { window.history.back(); }
+
+// Date validation
+const lastInvDate = "{{ last_inv_date or '' }}";
+document.getElementById('abForm')?.addEventListener('submit', function(e) {
+  const start = document.querySelector('input[name=start_date]')?.value;
+  const end   = document.querySelector('input[name=end_date]')?.value;
+  if (!start || !end) { alert('Date range select karein.'); e.preventDefault(); return; }
+  if (start > end)    { alert('Start date, End date se pehle honi chahiye.'); e.preventDefault(); return; }
+  if (lastInvDate && start < lastInvDate) {
+    alert(`Start date ${start} last invoice date ${lastInvDate} se pehle hai.\nPlease ${lastInvDate} ke baad ki date select karein.`);
+    e.preventDefault(); return;
+  }
+  const checked = document.querySelectorAll('input[name=product_ids]:checked');
+  if (checked.length === 0) { alert('Kam se kam ek product select karein.'); e.preventDefault(); return; }
+});
+</script>
+{% endblock %}

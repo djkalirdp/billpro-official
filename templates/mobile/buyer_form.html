@@ -69,6 +69,39 @@
                placeholder="0.00" />
         <span style="font-size:11px;color:var(--text-muted);">Billing mein warning aayegi jab outstanding limit cross kare</span>
       </div>
+
+      <!-- Auto Billing Toggle -->
+      <div class="m-fg">
+        <label class="m-label">Auto Billing</label>
+        <div style="display:flex;align-items:center;gap:12px;padding:14px;
+                    background:#f0fdf4;border:1.5px solid #a7f3d0;border-radius:12px;
+                    cursor:pointer;" onclick="mAbToggle()">
+          <div style="flex:1;">
+            <div style="font-weight:700;font-size:14px;color:#065f46;">
+              <i class="bi bi-lightning-fill me-2" style="color:#059669;"></i>
+              Auto Billing
+            </div>
+            <div style="font-size:12px;color:#6b7280;margin-top:2px;">
+              Enable karein taaki Auto Billing mein use ho
+            </div>
+          </div>
+          <!-- Toggle -->
+          <div id="mAbTrack"
+               style="width:48px;height:26px;border-radius:99px;flex-shrink:0;
+                      background:{{ '#059669' if buyer and buyer.get('auto_billing') else '#d1d5db' }};
+                      transition:background .2s;position:relative;">
+            <div id="mAbThumb"
+                 style="position:absolute;top:3px;
+                        left:{{ '22px' if buyer and buyer.get('auto_billing') else '3px' }};
+                        width:20px;height:20px;border-radius:50%;background:white;
+                        transition:left .2s;box-shadow:0 1px 4px rgba(0,0,0,.3);"></div>
+            <input type="checkbox" name="auto_billing" id="mAbCb" value="1"
+                   {{ 'checked' if buyer and buyer.get('auto_billing') else '' }}
+                   style="display:none;" />
+          </div>
+        </div>
+      </div>
+
     </div>
   </div>
 
@@ -91,5 +124,13 @@ document.getElementById('buyerForm').addEventListener('submit',function(){
   btn.innerHTML='<span class="spinner-border spinner-border-sm me-2"></span>Saving...';
   btn.disabled=true;
 });
+function mAbToggle() {
+  const cb = document.getElementById('mAbCb');
+  cb.checked = !cb.checked;
+  const track = document.getElementById('mAbTrack');
+  const thumb = document.getElementById('mAbThumb');
+  track.style.background = cb.checked ? '#059669' : '#d1d5db';
+  thumb.style.left = cb.checked ? '20px' : '2px';
+}
 </script>
 {% endblock %}

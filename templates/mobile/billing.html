@@ -185,9 +185,9 @@
     </div>
     <div class="m-fg">
       <label class="m-label">Payment Mode</label>
-      <select id="f_payMode" class="m-select" onchange="onPayMode(this.value)">
+      <select id="f_payMode" class="m-select" onchange="setPayMode(this.value)">
         <option value="Credit">Credit</option>
-        <option value="Cash">Cash</option>
+        <option value="Cash" selected>Cash</option>
         <option value="UPI">UPI</option>
         <option value="Bank Transfer">Bank Transfer</option>
         <option value="Cheque">Cheque</option>
@@ -289,6 +289,10 @@ let rows       = {};         // { idx: { product_id, gst_rate, _prod } }
 //  STEP NAVIGATION
 // ═══════════════════════════════════════════════════════════════════
 function goStep(n) {
+  if (n === 4) {
+    // Trigger recalc so round-off and paid amount fill correctly
+    setTimeout(() => recalc(), 50);
+  }
   [1,2,3,4].forEach(i => {
     document.getElementById('step'+i).classList.toggle('active', i===n);
     const t = document.getElementById('tab'+i);
@@ -755,8 +759,11 @@ function recalc() {
 
   // Auto-fill paid if Cash/non-credit mode
   const modeEl = document.getElementById('f_payment_mode');
+  const currentPaid = parseFloat(document.getElementById('f_paid').value || 0);
   if (modeEl && modeEl.value !== 'Credit') {
     document.getElementById('f_paid').value = grandRound.toFixed(2);
+  } else if (modeEl && modeEl.value === 'Credit') {
+    document.getElementById('f_paid').value = '0';
   }
 
   if (isIgst) {
@@ -922,6 +929,7 @@ function esc(s) {
 }
 
 // ── INIT ─────────────────────────────────────────────────────────
-addItem();
+// Start with four blank item cards for faster invoice entry.
+for (let i = 0; i < 4; i++) addItem();
 </script>
 {% endblock %}

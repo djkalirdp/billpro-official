@@ -1,0 +1,22 @@
+{% extends 'base.html' %}
+{% block title %}Stock Adjustment{% endblock %}
+{% block page_title %}Stock Adjustment{% endblock %}
+{% block content %}
+<div class="row g-3">
+  <div class="col-lg-4"><div class="card border-0 shadow-sm"><div class="card-body">
+    <h5 class="mb-3">Adjust product stock</h5>
+    <form method="post">
+      <div class="mb-3"><label class="form-label">Product / variation</label><select class="form-select" name="stock_item" required><option value="">Select stock item</option>{% for p in products %}<optgroup label="{{ p.name }}"><option value="product:{{ p.id }}">Main stock — available {{ p.stock_qty }}</option>{% for v in p.variations %}<option value="variation:{{ v.id }}:{{ p.id }}">{{ v.variation_name }} — available {{ v.stock_qty }}</option>{% endfor %}</optgroup>{% endfor %}</select></div>
+      <div class="mb-3"><label class="form-label">Adjustment type</label><select class="form-select" name="adjustment_type" required><option value="in">Add stock</option><option value="out">Remove stock</option><option value="set">Set exact stock quantity</option></select><div class="form-text">For “Set exact”, quantity is the new stock balance.</div></div>
+      <div class="mb-3"><label class="form-label">Quantity</label><input class="form-control" type="number" name="quantity" min="0" step="0.001" required></div>
+      <div class="mb-3"><label class="form-label">Reason</label><input class="form-control" name="reason" maxlength="250" placeholder="Physical count, damage, opening correction…" required></div>
+      <button class="btn btn-primary w-100">Save adjustment</button>
+    </form>
+  </div></div></div>
+  <div class="col-lg-8"><div class="card border-0 shadow-sm"><div class="card-body">
+    <h5 class="mb-3">Recent stock adjustments</h5><div class="table-responsive"><table class="table table-sm align-middle"><thead><tr><th>Date</th><th>Product</th><th>Type</th><th>Qty</th><th>Previous</th><th>New</th><th>Reason</th><th>By</th></tr></thead><tbody>
+    {% for a in adjustments %}<tr><td>{{ a.adjustment_date }}</td><td>{{ a.product_name }}{% if a.variation_name %}<small class="d-block text-muted">{{ a.variation_name }}</small>{% endif %}</td><td>{{ {'in':'Stock in','out':'Stock out','set':'Set balance'}.get(a.adjustment_type,a.adjustment_type) }}</td><td>{{ a.quantity }}</td><td>{{ a.previous_stock }}</td><td><strong>{{ a.new_stock }}</strong></td><td>{{ a.reason }}</td><td>{{ a.created_by }}</td></tr>{% else %}<tr><td colspan="8" class="text-center text-muted py-4">No adjustments recorded yet.</td></tr>{% endfor %}
+    </tbody></table></div>
+  </div></div></div>
+</div>
+{% endblock %}

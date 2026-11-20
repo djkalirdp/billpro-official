@@ -18,14 +18,17 @@
 import sqlite3
 import os
 import shutil
+import math
+import re
 from datetime import datetime, timedelta
 from werkzeug.security import generate_password_hash, check_password_hash
 
 # ─────────────────────────────────────────────
 #  CONFIG
 # ─────────────────────────────────────────────
-DB_FILE    = os.path.join('data', 'billing_app.db')
-BACKUP_DIR = 'backups'
+BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
+DB_FILE    = os.path.join(BASE_DIR, 'data', 'billing_app.db')
+BACKUP_DIR = os.path.join(BASE_DIR, 'backups')
 
 
 # ─────────────────────────────────────────────
@@ -201,6 +204,7 @@ def create_tables():
         "ALTER TABLE products ADD COLUMN reorder_level REAL DEFAULT 5",
         # Credit limit per buyer
         "ALTER TABLE buyers ADD COLUMN credit_limit REAL DEFAULT 0",
+        "ALTER TABLE buyers ADD COLUMN auto_billing INTEGER DEFAULT 0",
         # batch_tracking new columns (for existing DBs)
         "ALTER TABLE batch_tracking ADD COLUMN purchase_item_id INTEGER DEFAULT NULL",
         "ALTER TABLE batch_tracking ADD COLUMN invoice_item_id INTEGER DEFAULT NULL",
@@ -241,6 +245,12 @@ def create_tables():
             FOREIGN KEY (product_id) REFERENCES products(id)
         )
     ''')
+    # Apply invoice-item extensions after the base table exists (fresh DBs too).
+    invoice_item_columns = {r['name'] for r in c.execute("PRAGMA table_info(invoice_items)").fetchall()}
+    if 'variation_id' not in invoice_item_columns:
+        c.execute("ALTER TABLE invoice_items ADD COLUMN variation_id INTEGER DEFAULT NULL")
+    if 'batch_no' not in invoice_item_columns:
+        c.execute("ALTER TABLE invoice_items ADD COLUMN batch_no TEXT DEFAULT ''")
 
     # ── Product Variations ───────────────────────────────
     c.execute('''
@@ -447,6 +457,36 @@ def create_tables():
         )
     ''')
 
+    # ── Stock adjustment audit trail ─────────────────────────────
+    c.execute("""CREATE TABLE IF NOT EXISTS stock_adjustments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        product_id INTEGER NOT NULL,
+        variation_id INTEGER,
+        adjustment_date TEXT NOT NULL,
+        adjustment_type TEXT NOT NULL,
+        quantity REAL NOT NULL,
+        previous_stock REAL NOT NULL,
+        new_stock REAL NOT NULL,
+        reason TEXT NOT NULL,
+        created_by TEXT,
+        FOREIGN KEY (product_id) REFERENCES products(id),
+        FOREIGN KEY (variation_id) REFERENCES product_variations(id)
+    )""")
+
+    # ── Operating expenses ───────────────────────────────────────
+    c.execute("""CREATE TABLE IF NOT EXISTS expenses (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        expense_date TEXT NOT NULL,
+        category TEXT NOT NULL,
+        description TEXT NOT NULL,
+        amount REAL NOT NULL CHECK(amount > 0),
+        payment_mode TEXT DEFAULT 'Cash',
+        reference_no TEXT,
+        notes TEXT,
+        created_by TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )""")
+
     # ── Default Admin (only if no users exist) ─
     c.execute("SELECT COUNT(*) FROM users")
     if c.fetchone()[0] == 0:
@@ -513,6 +553,74 @@ def create_tables():
 
 
 # ─────────────────────────────────────────────
+#  STOCK ADJUSTMENTS & EXPENSES
+# ─────────────────────────────────────────────
+def adjust_stock(product_id, quantity, adjustment_type, reason, variation_id=None, created_by=''):
+    """Apply a stock correction and write its audit record atomically."""
+    quantity = float(quantity)
+    if not math.isfinite(quantity) or quantity < 0 or (quantity == 0 and adjustment_type != 'set') or adjustment_type not in ('in', 'out', 'set') or not str(reason).strip():
+        return False, 'Enter a positive quantity, adjustment reason and valid type.'
+    conn = get_db_connection()
+    try:
+        c = conn.cursor()
+        table = 'product_variations' if variation_id else 'products'
+        key = int(variation_id if variation_id else product_id)
+        row = c.execute(f"SELECT stock_qty FROM {table} WHERE id=?" if variation_id else
+                         "SELECT stock_qty FROM products WHERE id=?", (key,)).fetchone()
+        if not row:
+            return False, 'Product or variation not found.'
+        previous = float(row['stock_qty'] or 0)
+        new_stock = quantity if adjustment_type == 'set' else (previous + quantity if adjustment_type == 'in' else previous - quantity)
+        if new_stock < 0:
+            return False, f'Insufficient stock. Available: {previous:g}.'
+        c.execute(f"UPDATE {table} SET stock_qty=? WHERE id=?", (new_stock, key))
+        c.execute("""INSERT INTO stock_adjustments
+            (product_id, variation_id, adjustment_date, adjustment_type, quantity,
+             previous_stock, new_stock, reason, created_by)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (int(product_id), int(variation_id) if variation_id else None,
+             datetime.now().strftime('%Y-%m-%d %H:%M:%S'), adjustment_type,
+             quantity, previous, new_stock, str(reason).strip(), created_by))
+        conn.commit()
+        return True, new_stock
+    except Exception as exc:
+        conn.rollback()
+        return False, str(exc)
+    finally:
+        conn.close()
+
+
+def get_stock_adjustments(limit=250):
+    return execute_query("""SELECT sa.*, p.name AS product_name,
+        pv.variation_name FROM stock_adjustments sa
+        JOIN products p ON p.id=sa.product_id
+        LEFT JOIN product_variations pv ON pv.id=sa.variation_id
+        ORDER BY sa.id DESC LIMIT ?""", (int(limit),), fetchall=True)
+
+
+def get_expenses(start_date=None, end_date=None):
+    sql = "SELECT * FROM expenses WHERE 1=1"
+    params = []
+    if start_date:
+        sql += " AND expense_date >= ?"; params.append(start_date)
+    if end_date:
+        sql += " AND expense_date <= ?"; params.append(end_date)
+    sql += " ORDER BY expense_date DESC, id DESC"
+    return execute_query(sql, tuple(params), fetchall=True)
+
+
+def add_expense(data):
+    required = ('expense_date', 'category', 'description', 'amount')
+    if any(not str(data.get(k, '')).strip() for k in required):
+        return None
+    amount = float(data['amount'])
+    if not math.isfinite(amount) or amount <= 0:
+        return None
+    datetime.strptime(str(data['expense_date']), '%Y-%m-%d')
+    return add_record('expenses', data)
+
+
+# ─────────────────────────────────────────────
 #  BACKUP
 # ─────────────────────────────────────────────
 def daily_backup():
@@ -526,8 +634,14 @@ def daily_backup():
     ts = datetime.now().strftime("%Y-%m-%d")
     bf = os.path.join(BACKUP_DIR, f"backup_{ts}.db")
     if not os.path.exists(bf):
-        shutil.copy2(DB_FILE, bf)
-        print(f"[BACKUP] Created: {bf}")
+        source = sqlite3.connect(DB_FILE)
+        target = sqlite3.connect(bf)
+        try:
+            source.backup(target)
+            target.commit()
+            print(f"[BACKUP] Created: {bf}")
+        finally:
+            target.close(); source.close()
 
 
 # ─────────────────────────────────────────────
@@ -880,25 +994,16 @@ def update_product_stock(product_id, qty_to_add, new_cost_price=None):
 #  INVOICES  (Sales)
 # ─────────────────────────────────────────────
 def get_next_invoice_number(prefix="INV-"):
-    """
-    Auto-generates the next sequential invoice number.
-    Example: INV-0001, INV-0002, ...
-    """
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute(
-        "SELECT invoice_no FROM invoices WHERE invoice_no LIKE ? ORDER BY id DESC LIMIT 1",
-        (f"{prefix}%",)
-    )
-    last = c.fetchone()
-    conn.close()
-    if last:
-        try:
-            last_num = int(last['invoice_no'].split(prefix)[-1])
-            return f"{prefix}{last_num + 1:04d}"
-        except (ValueError, IndexError):
-            pass
-    return f"{prefix}0001"
+    """Return the next sequential invoice number, ignoring cancellation suffixes."""
+    prefix = str(prefix or 'INV-')
+    rows = execute_query("SELECT invoice_no FROM invoices WHERE invoice_no LIKE ?", (f"{prefix}%",), fetchall=True) or []
+    numbers = []
+    pattern = re.compile(r'^' + re.escape(prefix) + r'(\d+)')
+    for row in rows:
+        match = pattern.match(str(row.get('invoice_no') or ''))
+        if match:
+            numbers.append(int(match.group(1)))
+    return f"{prefix}{(max(numbers, default=0) + 1):04d}"
 
 
 def save_invoice(inv_data, items, company_state):
@@ -966,6 +1071,19 @@ def save_invoice(inv_data, items, company_state):
 
         # ── Insert Line Items & Deduct Stock ──────────────────
         for item in items:
+            qty = float(item.get('quantity') or 0)
+            vid = item.get('variation_id')
+            pid = item.get('product_id')
+            if qty <= 0:
+                raise ValueError('Invoice item quantity must be greater than zero.')
+            if vid and int(vid) > 0:
+                stock_row = c.execute("SELECT stock_qty FROM product_variations WHERE id=?", (int(vid),)).fetchone()
+                if not stock_row or float(stock_row['stock_qty'] or 0) < qty:
+                    raise ValueError(f"Insufficient variation stock for {item.get('description', 'item')}.")
+            elif pid and int(pid) > 0:
+                stock_row = c.execute("SELECT stock_qty FROM products WHERE id=?", (int(pid),)).fetchone()
+                if not stock_row or float(stock_row['stock_qty'] or 0) < qty:
+                    raise ValueError(f"Insufficient stock for {item.get('description', 'item')}.")
             c.execute('''
                 INSERT INTO invoice_items
                   (invoice_id, product_id, description, hsn,
@@ -1013,15 +1131,15 @@ def save_invoice(inv_data, items, company_state):
             pid = item.get('product_id')
             qty = item['quantity']
             if vid and int(vid) > 0:
-                c.execute(
-                    "UPDATE product_variations SET stock_qty = stock_qty - ? WHERE id = ?",
-                    (qty, int(vid))
-                )
+                c.execute("UPDATE product_variations SET stock_qty=stock_qty-? WHERE id=? AND stock_qty>=?",
+                          (qty, int(vid), qty))
+                if c.rowcount != 1:
+                    raise ValueError(f"Stock changed while saving {item.get('description', 'item')}; retry the invoice.")
             elif pid and int(pid) > 0:
-                c.execute(
-                    "UPDATE products SET stock_qty = stock_qty - ? WHERE id = ?",
-                    (qty, int(pid))
-                )
+                c.execute("UPDATE products SET stock_qty=stock_qty-? WHERE id=? AND stock_qty>=?",
+                          (qty, int(pid), qty))
+                if c.rowcount != 1:
+                    raise ValueError(f"Stock changed while saving {item.get('description', 'item')}; retry the invoice.")
 
         conn.commit()
         return invoice_id
@@ -3351,3 +3469,159 @@ def delete_proforma(proforma_id):
     finally:
         conn.close()
 
+
+
+# ─────────────────────────────────────────────────────────────────
+#  AUTO BILLING — Bulk Random Invoice Generator
+# ─────────────────────────────────────────────────────────────────
+
+def get_auto_billing_buyers():
+    """Return buyers with auto_billing = 1."""
+    return execute_query(
+        "SELECT * FROM buyers WHERE auto_billing = 1 ORDER BY name",
+        fetchall=True
+    ) or []
+
+
+def bulk_create_invoices(invoice_list):
+    """Create auto-billing invoices without allowing partial invoices or negative stock.
+
+    Each invoice is isolated by a SQLite savepoint. Stock is decremented with a
+    conditional UPDATE, so concurrent sales cannot drive stock below zero.
+    """
+    conn = get_db_connection()
+    c = conn.cursor()
+    success = 0
+    errors = []
+    try:
+        for inv in invoice_list:
+            invoice_no = inv.get('invoice_no', '?')
+            c.execute('SAVEPOINT auto_invoice')
+            try:
+                # Validate all requested quantities before writing the invoice.
+                for it in inv.get('items', []):
+                    qty = float(it.get('quantity', 0) or 0)
+                    pid = int(it.get('product_id') or 0)
+                    if pid <= 0 or qty <= 0:
+                        raise ValueError('Invalid product or quantity')
+                    stock = c.execute(
+                        "SELECT stock_qty, name FROM products WHERE id = ?", (pid,)
+                    ).fetchone()
+                    if not stock:
+                        raise ValueError(f"Product {pid} no longer exists")
+                    if float(stock['stock_qty'] or 0) < qty:
+                        raise ValueError(
+                            f"Insufficient stock for {stock['name']}: "
+                            f"available {float(stock['stock_qty'] or 0):g}, required {qty:g}"
+                        )
+
+                c.execute("""
+                    INSERT INTO invoices (
+                        invoice_no, buyer_id, invoice_date, payment_mode,
+                        subtotal, total_discount, taxable_value,
+                        total_gst, total_cgst, total_sgst, total_igst,
+                        freight, round_off, grand_total, paid_amount,
+                        order_ref, dispatch_info
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """, (
+                    inv['invoice_no'], inv['buyer_id'], inv['invoice_date'],
+                    inv.get('payment_mode', 'Cash'),
+                    inv['taxable_value'], 0, inv['taxable_value'],
+                    inv['total_gst'], inv['total_cgst'], inv['total_sgst'],
+                    inv['total_igst'], inv.get('freight', 0),
+                    inv.get('round_off', 0), inv['grand_total'],
+                    inv.get('paid_amount', inv['grand_total']),
+                    'Auto-Billing', ''
+                ))
+                invoice_id = c.lastrowid
+
+                for it in inv['items']:
+                    c.execute("""
+                        INSERT INTO invoice_items (
+                            invoice_id, product_id, description, hsn,
+                            gst_rate, quantity, rate, discount_percent, amount,
+                            variation_id, batch_no
+                        ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                    """, (
+                        invoice_id, it['product_id'], it.get('description', ''),
+                        it.get('hsn', ''), it.get('gst_rate', 0),
+                        it['quantity'], it['rate'], 0, it['amount'], None, ''
+                    ))
+                    # Guarded decrement is the final authority; it also protects
+                    # against another transaction selling stock after pre-check.
+                    c.execute("""
+                        UPDATE products
+                           SET stock_qty = stock_qty - ?
+                         WHERE id = ? AND stock_qty >= ?
+                    """, (it['quantity'], it['product_id'], it['quantity']))
+                    if c.rowcount != 1:
+                        raise ValueError(
+                            f"Insufficient stock for {it.get('description', it['product_id'])}"
+                        )
+
+                paid = float(inv.get('paid_amount', inv['grand_total']) or 0)
+                if paid > 0 and inv.get('payment_mode', 'Cash') != 'Credit':
+                    c.execute("""
+                        INSERT INTO customer_payments
+                            (buyer_id, payment_date, amount, payment_mode, notes)
+                        VALUES (?,?,?,?,?)
+                    """, (
+                        inv['buyer_id'], inv['invoice_date'], paid,
+                        inv.get('payment_mode', 'Cash'),
+                        f"Auto-billing: {inv['invoice_no']}"
+                    ))
+
+                c.execute('RELEASE SAVEPOINT auto_invoice')
+                success += 1
+            except Exception as e:
+                c.execute('ROLLBACK TO SAVEPOINT auto_invoice')
+                c.execute('RELEASE SAVEPOINT auto_invoice')
+                errors.append(f"{invoice_no}: {e}")
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        errors.append(f"DB commit error: {e}")
+    finally:
+        conn.close()
+    return success, errors
+
+
+def get_last_invoice_date():
+    """Return the date of the most recent non-cancelled invoice, or None."""
+    row = execute_query(
+        """SELECT invoice_date FROM invoices
+           WHERE invoice_no NOT LIKE '[CANCELLED]%'
+           ORDER BY invoice_date DESC, id DESC LIMIT 1""",
+        fetchone=True
+    )
+    return row['invoice_date'] if row else None
+
+
+def get_next_invoice_number_bulk(count):
+    """
+    Reserve `count` sequential invoice numbers.
+    Uses same prefix logic as get_next_invoice_number().
+    Numbers are returned in order — caller must sort invoices by date first.
+    """
+    import json as _json, os as _os
+    conn = get_db_connection()
+    c    = conn.cursor()
+    try:
+        settings_path = _os.path.join(
+            _os.path.dirname(_os.path.abspath(__file__)), 'settings.json')
+        try:
+            with open(settings_path) as sf:
+                s = _json.load(sf)
+            prefix = s.get('invoice_settings', {}).get('invoice_prefix', 'INV-')
+        except Exception:
+            prefix = 'INV-'
+
+        # Ignore any cancellation suffix and use the highest numeric suffix.
+        rows = c.execute("SELECT invoice_no FROM invoices WHERE invoice_no LIKE ?", (f"{prefix}%",)).fetchall()
+        pattern = re.compile(r'^' + re.escape(prefix) + r'(\d+)')
+        numbers = [int(m.group(1)) for row in rows
+                   for m in [pattern.match(str(row['invoice_no'] or ''))] if m]
+        start_num = max(numbers, default=0) + 1
+        return [f"{prefix}{str(start_num + i).zfill(4)}" for i in range(count)]
+    finally:
+        conn.close()

@@ -14,6 +14,10 @@ function setDnSize(size, btn) {
 {% block page_title %}Debit Note{% endblock %}
 {% block topbar_actions %}
 <a href="{{ url_for('debit_notes') }}" class="m-icon-btn"><i class="bi bi-arrow-left"></i></a>
+<a id="dnPdfBtn" href="{{ url_for('debit_note_pdf', dn_id=dn.id) }}?size=A4"
+   class="m-icon-btn" style="color:#dc2626;" target="_blank">
+  <i class="bi bi-file-pdf"></i>
+</a>
 {% endblock %}
 {% block content %}
 <div style="background:linear-gradient(135deg,#d97706,#b45309);color:white;margin:14px 14px 10px;border-radius:var(--radius);padding:18px;">
@@ -60,4 +64,17 @@ function setDnSize(size, btn) {
     <i class="bi bi-list-ul"></i> All Debit Notes
   </a>
 </div>
+{% block scripts %}
+<script>
+function setDnSize(size, btn) {
+  document.getElementById('dnSizeRow').querySelectorAll('button').forEach(b => {
+    b.style.borderColor='var(--border)'; b.style.color='#475569'; b.style.background='white';
+  });
+  btn.style.borderColor='#d97706'; btn.style.color='#d97706'; btn.style.background='#fffbeb';
+  const url = `/debit-notes/{{ dn.id }}/pdf?size=${size}`;
+  document.getElementById('dnPdfBtn').href = url;
+  document.getElementById('dnPdfBtnBottom').href = url;
+}
+</script>
+{% endblock %}
 {% endblock %}

@@ -25,6 +25,7 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import cm, mm
 from reportlab.lib.enums import TA_CENTER, TA_RIGHT, TA_LEFT
 from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.pdfmetrics import stringWidth
 from reportlab.pdfbase.ttfonts import TTFont
 from num2words import num2words
 import os
@@ -278,6 +279,16 @@ def create_invoice_pdf(invoice_data, items, settings,
     bank   = settings.get('bank_details', {})
     terms  = settings.get('invoice_settings', {}).get('terms_and_conditions', '')
 
+    # ── ONE common width for EVERY table on the page ──────────────
+    # (header, items, footer, HSN, terms) -> edges line up exactly.
+    CW_CM    = 19.0 * W_SCALE                       # cm
+    CW_PT    = CW_CM * cm
+    _frame_w = psize[0] - margins['leftMargin'] - margins['rightMargin']
+    _inset   = max(0.0, (_frame_w - 12 - CW_PT) / 2.0)   # frame has 6pt padding each side; tables are centred — align loose text to them
+    HALF_CM  = CW_CM / 2.0                          # shared vertical divider for head / footer / terms
+    S['copy_label'] = ParagraphStyle('CopyLbl2', parent=S['copy_label'], rightIndent=_inset)
+    S['footer_small_in'] = ParagraphStyle('F_SmIn', parent=S['footer_small'], leftIndent=_inset)
+
     if is_proforma:
         copies     = ["SALES QUOTATION"]
         doc_title  = "SALES QUOTATION"
@@ -314,7 +325,7 @@ def create_invoice_pdf(invoice_data, items, settings,
             except Exception:
                 pass
 
-        _cell_w  = 9.5 * W_SCALE       # cm — one side of the header table
+        _cell_w  = HALF_CM             # cm — one side of the header table
         _logo_cw = 2.2 * W_SCALE       # cm — logo column when present
         _text_cw = _cell_w - _logo_cw  # cm — text column when logo present
 
@@ -368,8 +379,9 @@ def create_invoice_pdf(invoice_data, items, settings,
                 ["Ref:",         str(invoice_data.get('order_ref')    or '')],
                 ["Dispatch:",    str(invoice_data.get('dispatch_info')or '')],
             ]
-        _inv_lbl_w = 2.5 * W_SCALE
-        _inv_val_w = (_cell_w - _inv_lbl_w)  # fills the remaining cell width
+        _lbl_need  = max(stringWidth(r[0], S['header_lbl'].fontName, S['header_lbl'].fontSize) for r in inv_rows) + 12 + 4
+        _inv_lbl_w = max(2.5 * W_SCALE, _lbl_need / cm)          # cm — label never wraps
+        _inv_val_w = (_cell_w - _inv_lbl_w) - 0.45               # minus the cell's own 6pt L/R padding
         t_inv = Table(
             [[Paragraph(r[0], S['header_lbl']), Paragraph(r[1], S['header_txt'])]
              for r in inv_rows],
@@ -392,27 +404,71 @@ def create_invoice_pdf(invoice_data, items, settings,
 
         # ── Items Table ───────────────────────────────────────────
         col_headers = ['S.No.', 'Description', 'HSN', 'GST%', 'Qty', 'Rate', 'Unit', 'Disc%', 'Amount']
-        _cw = [1.2, 6, 2.2, 1.4, 1.5, 2, 1.2, 1.2, 2.3]
-        col_widths = [w * W_SCALE * cm for w in _cw]
-        table_data   = [[Paragraph(h, S['item_head']) for h in col_headers]]
 
+        def _money(v):
+            # NBSP keeps "Rs." / "₹" glued to the number — never splits across lines
+            return f"{CURRENCY_SYM}\u00a0{float(v or 0):.2f}"
+
+        total_qty = sum((it.get('quantity') or 0) for it in items)   # same type behaviour as before
+
+        # ── 1. Measure what each column really needs (at normal font size) ──
+        _PADX    = 3                                    # left/right cell padding (pt)
+        _hf, _hs = S['item_head'].fontName, S['item_head'].fontSize
+        _rf, _rs = S['item_num'].fontName,  S['item_num'].fontSize
+        _need = [stringWidth(h, _hf, _hs) for h in col_headers]
+        for it_i, it in enumerate(items):
+            _cells = {0: str(it_i + 1),
+                      2: str(it.get('hsn') or ''),
+                      3: f"{it.get('gst_rate') or 0}%",
+                      4: str(it.get('quantity') or 0),
+                      5: _money(it.get('rate')),
+                      6: str(it.get('unit') or ''),
+                      7: str(it.get('discount_percent') or 0),
+                      8: _money(it.get('amount'))}
+            for j, txt in _cells.items():
+                _need[j] = max(_need[j], stringWidth(txt, _rf, _rs))
+        _need[4] = max(_need[4], stringWidth(str(total_qty), FONT_BOLD, _rs))
+        _need[8] = max(_need[8], stringWidth(_money(invoice_data.get('subtotal')), FONT_BOLD, _rs))
+
+        _floor    = [1.0, 0.0, 1.8, 1.3, 1.3, 1.8, 1.1, 1.1, 2.2]   # cm @ A4 — minimum look
+        _desc_min = 3.5 * W_SCALE * cm
+
+        # ── 2. If numbers are huge, shrink the item font a little until everything fits ──
+        _fscale = 1.0
+        while True:
+            _fixed = [0.0 if j == 1 else max(_floor[j] * W_SCALE * cm, _need[j] * _fscale + 2 * _PADX + 3)
+                      for j in range(9)]
+            if CW_PT - sum(_fixed) >= _desc_min or _fscale <= 0.65:
+                break
+            _fscale -= 0.05
+        _fixed[1]  = max(CW_PT - sum(_fixed), 0.5 * cm)
+        col_widths = _fixed
+
+        if _fscale < 1.0:
+            SI = {k: ParagraphStyle(k + '_fit', parent=S[k],
+                                    fontSize=S[k].fontSize * _fscale,
+                                    leading=max(S[k].leading * _fscale, S[k].fontSize * _fscale * 1.15))
+                  for k in ('item_head', 'item_txt', 'item_num', 'item_center')}
+        else:
+            SI = S
+
+        # ── 3. Build the rows ──
+        table_data   = [[Paragraph(h, SI['item_head']) for h in col_headers]]
         gst_analysis = {}
-        total_qty    = 0
 
         for idx, item in enumerate(items):
             row = [
-                Paragraph(str(idx + 1),                                  S['item_center']),
-                Paragraph(f"<b>{item.get('description') or ''}</b>",     S['item_txt']),
-                Paragraph(str(item.get('hsn') or ''),                    S['item_center']),
-                Paragraph(f"{item.get('gst_rate') or 0}%",              S['item_center']),
-                Paragraph(str(item.get('quantity') or 0),                S['item_num']),
-                Paragraph(f"{CURRENCY_SYM} {float(item.get('rate') or 0):.2f}",   S['item_num']),
-                Paragraph(str(item.get('unit') or ''),                   S['item_center']),
-                Paragraph(str(item.get('discount_percent') or 0),        S['item_center']),
-                Paragraph(f"{CURRENCY_SYM} {float(item.get('amount') or 0):.2f}", S['item_num']),
+                Paragraph(str(idx + 1),                                  SI['item_center']),
+                Paragraph(f"<b>{item.get('description') or ''}</b>",     SI['item_txt']),
+                Paragraph(str(item.get('hsn') or ''),                    SI['item_center']),
+                Paragraph(f"{item.get('gst_rate') or 0}%",              SI['item_center']),
+                Paragraph(str(item.get('quantity') or 0),                SI['item_num']),
+                Paragraph(_money(item.get('rate')),                      SI['item_num']),
+                Paragraph(str(item.get('unit') or ''),                   SI['item_center']),
+                Paragraph(str(item.get('discount_percent') or 0),        SI['item_center']),
+                Paragraph(_money(item.get('amount')),                    SI['item_num']),
             ]
             table_data.append(row)
-            total_qty += item['quantity']
 
             # Accumulate GST analysis per HSN+rate combination
             key = (item.get('hsn') or 'NA', item['gst_rate'])
@@ -428,11 +484,11 @@ def create_invoice_pdf(invoice_data, items, settings,
 
         # Totals row
         table_data.append([
-            '', Paragraph("<b>Total</b>", S['item_num']),
+            '', Paragraph("<b>Total</b>", SI['item_num']),
             '', '',
-            Paragraph(f"<b>{total_qty}</b>", S['item_num']),
+            Paragraph(f"<b>{total_qty}</b>", SI['item_num']),
             '', '', '',
-            Paragraph(f"<b>{CURRENCY_SYM} {float(invoice_data.get('subtotal') or 0):.2f}</b>", S['item_num'])
+            Paragraph(f"<b>{_money(invoice_data.get('subtotal'))}</b>", SI['item_num'])
         ])
 
         t_items = Table(table_data, colWidths=col_widths, repeatRows=1)
@@ -444,6 +500,8 @@ def create_invoice_pdf(invoice_data, items, settings,
             ('VALIGN',      (0,0), (-1,-1), 'MIDDLE'),
             ('TOPPADDING',  (0,0), (-1,-1), 3),
             ('BOTTOMPADDING',(0,0),(-1,-1), 3),
+            ('LEFTPADDING', (0,0), (-1,-1), _PADX),
+            ('RIGHTPADDING',(0,0), (-1,-1), _PADX),
         ]))
         elements.append(t_items)
 
@@ -518,16 +576,20 @@ def create_invoice_pdf(invoice_data, items, settings,
             bank_lines.append([Paragraph(f"UPI:  {upi_id}", S['footer_txt'])])
 
         _qr_cw   = 3.0 * W_SCALE   # cm — QR column in bank section
-        _bank_cw = (11 * W_SCALE) - _qr_cw  # remaining for bank text
+        _bank_cw = HALF_CM - _qr_cw - 0.4   # remaining for bank text (0.4cm = side padding)
         if qr_drawing:
+            _qr_cap = f"{CURRENCY_SYM}\u00a0{qr_amount:,.2f}"          # amount caption under the QR
+            _qr_fs  = max(5, min(round(8 * FS),                         # shrink only if it would not fit one line
+                                 (_qr_cw * cm - 8) / stringWidth(_qr_cap, FONT_BOLD, 1)))
             qr_col = [
                 [Paragraph("<b>Scan to Pay</b>",
                            ParagraphStyle('qrl', parent=S['footer_txt'],
                                           alignment=TA_CENTER, fontSize=round(7*FS)))],
                 [qr_drawing],
-                [Paragraph(f"\u20b9{qr_amount:,.2f}",
+                [Paragraph(_qr_cap,
                            ParagraphStyle('qra', parent=S['footer_txt'],
-                                          alignment=TA_CENTER, fontName=FONT_BOLD, fontSize=round(8*FS)))],
+                                          alignment=TA_CENTER, fontName=FONT_BOLD,
+                                          fontSize=_qr_fs, leading=_qr_fs + 2))],
             ]
             bank_tbl   = Table(bank_lines, colWidths=[_bank_cw*cm])
             bank_tbl.setStyle(TableStyle([('LEFTPADDING', (0,0), (-1,-1), 0)]))
@@ -539,9 +601,9 @@ def create_invoice_pdf(invoice_data, items, settings,
         else:
             left_content = bank_lines
 
-        _lw = 11 * W_SCALE
+        _lw = HALF_CM
         t_left = Table(left_content, colWidths=[_lw*cm])
-        t_left.setStyle(TableStyle([('LEFTPADDING', (0,0), (-1,-1), 4)]))
+        t_left.setStyle(TableStyle([('LEFTPADDING', (0,0), (-1,-1), 8), ('RIGHTPADDING', (0,0), (-1,-1), 4)]))
 
         # Show paid only if actually paid (partial or full)
         if paid > 0:
@@ -554,15 +616,15 @@ def create_invoice_pdf(invoice_data, items, settings,
         else:
             add_right_row("Total Outstanding:", bal_due, bold=True)
 
-        _r1, _r2 = 4.5 * W_SCALE, 2.5 * W_SCALE
+        _r1, _r2 = HALF_CM * 0.58, HALF_CM * 0.42
         t_right = Table(right_content, colWidths=[_r1*cm, _r2*cm])
         t_right.setStyle(TableStyle([
             ('ALIGN',   (0,0), (-1,-1), 'RIGHT'),
             ('VALIGN',  (0,0), (-1,-1), 'TOP'),
-            ('RIGHTPADDING', (0,0), (-1,-1), 4),
+            ('RIGHTPADDING', (0,0), (-1,-1), 8),
         ]))
 
-        _fw = 8 * W_SCALE
+        _fw = HALF_CM
         t_foot = Table([[t_left, t_right]], colWidths=[_lw*cm, _fw*cm])
         t_foot.setStyle(TableStyle([
             ('BOX',       (0,0), (-1,-1), 0.5, colors.black),
@@ -570,6 +632,8 @@ def create_invoice_pdf(invoice_data, items, settings,
             ('VALIGN',    (0,0), (-1,-1), 'TOP'),
             ('TOPPADDING',(0,0), (-1,-1), 3),
             ('BOTTOMPADDING', (0,0), (-1,-1), 3),
+            ('LEFTPADDING',  (0,0), (-1,-1), 0),   # nested tables already carry their own padding,
+            ('RIGHTPADDING', (0,0), (-1,-1), 0),   # so values can no longer touch/overflow the border
         ]))
 
         # ── HSN/Tax Summary Table ─────────────────────────────────
@@ -623,7 +687,7 @@ def create_invoice_pdf(invoice_data, items, settings,
             tax_words = f"{tot_tax_amt:.2f} Only"
 
         footer_group.append(
-            Paragraph(f"Total Tax in words: <b>{tax_words}</b>", S['footer_small'])
+            Paragraph(f"Total Tax in words: <b>{tax_words}</b>", S['footer_small_in'])
         )
 
         t_hsn = Table(d_hsn, colWidths=w_hsn)
@@ -635,7 +699,7 @@ def create_invoice_pdf(invoice_data, items, settings,
         footer_group.append(t_hsn)
 
         # ── Terms & Signature ─────────────────────────────────────
-        _s1, _s2 = 10 * W_SCALE, 9 * W_SCALE
+        _s1, _s2 = HALF_CM, HALF_CM
         t_sig = Table([[
             Paragraph(f"<b>Terms & Conditions:</b><br/>{terms}", S['footer_small']),
             Paragraph(f"For <b>{c_info.get('name', 'Company')}</b><br/><br/>Authorized Signatory", S['item_num'])

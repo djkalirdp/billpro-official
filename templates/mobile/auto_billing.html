@@ -1,0 +1,190 @@
+{% extends 'mobile/base_mobile.html' %}
+{% block title %}Auto Billing{% endblock %}
+{% block page_title %}Auto Billing{% endblock %}
+{% block topbar_actions %}
+<a href="{{ url_for('invoices') }}" class="m-icon-btn"><i class="bi bi-arrow-left"></i></a>
+{% endblock %}
+
+{% block content %}
+{% if not preview %}
+<form method="POST" action="{{ url_for('auto_billing') }}">
+
+  <!-- Products -->
+  <div class="m-section-lbl" style="display:flex;align-items:center;justify-content:space-between;padding-right:14px;">
+    <span>Products</span>
+    <div style="display:flex;gap:6px;">
+      <button type="button" onclick="selAll()" style="padding:3px 10px;border:1.5px solid var(--accent);border-radius:6px;font-size:11px;font-weight:700;color:var(--accent);background:#eff6ff;cursor:pointer;">All</button>
+      <button type="button" onclick="selNone()" style="padding:3px 10px;border:1.5px solid var(--border);border-radius:6px;font-size:11px;font-weight:700;color:#475569;background:white;cursor:pointer;">None</button>
+    </div>
+  </div>
+  <div style="padding:0 14px 10px;">
+    <input type="text" class="m-input" placeholder="Product search..."
+           oninput="filterProds(this.value)" style="margin-bottom:8px;" />
+    <div id="prodGrid" style="display:flex;flex-direction:column;gap:5px;">
+      {% for p in products %}
+      <label style="display:flex;align-items:center;gap:10px;padding:9px 12px;background:white;
+                    border:1.5px solid var(--border);border-radius:10px;cursor:pointer;"
+             id="pc_{{ p.id }}">
+        <input type="checkbox" name="product_ids" value="{{ p.id }}" checked
+               onchange="this.closest('label').style.borderColor = this.checked ? 'var(--accent)' : 'var(--border)';
+                         this.closest('label').style.background = this.checked ? '#eff6ff' : 'white';"
+               style="width:16px;height:16px;" />
+        <div style="flex:1;">
+          <div style="font-weight:700;font-size:13.5px;">{{ p.name }}</div>
+          <div style="font-size:11.5px;color:var(--text-muted);">₹{{ '%.0f'|format(p.selling_price or p.rate or 0) }} · GST {{ p.gst_rate }}%</div>
+        </div>
+      </label>
+      {% endfor %}
+    </div>
+  </div>
+
+  <!-- Buyers -->
+  <div class="m-section-lbl">Auto-Billing Buyers</div>
+  <div style="padding:0 14px 10px;">
+    {% if buyers %}
+      {% for b in buyers %}
+      <div style="display:flex;align-items:center;gap:10px;padding:10px 12px;background:#ecfdf5;
+                  border:1px solid #a7f3d0;border-radius:10px;margin-bottom:6px;">
+        <i class="bi bi-check-circle-fill" style="color:#059669;"></i>
+        <span style="font-weight:700;font-size:13.5px;">{{ b.name }}</span>
+      </div>
+      {% endfor %}
+    {% else %}
+      <div style="text-align:center;padding:16px;color:var(--text-muted);font-size:13px;">
+        Koi buyer enabled nahi.<br>Buyers → Edit → Auto Billing ON karein.
+      </div>
+    {% endif %}
+  </div>
+
+  <!-- Date Range -->
+  <div class="m-section-lbl">Date Range</div>
+  {% if last_inv_date %}
+  <div style="margin:0 14px 8px;background:#fffbeb;border:1px solid #fde68a;border-radius:8px;
+              padding:9px 12px;font-size:12px;color:#78350f;">
+    <i class="bi bi-info-circle me-1"></i>
+    Last invoice: <b>{{ last_inv_date }}</b> — Start date iske baad select karein.
+  </div>
+  {% endif %}
+  <div style="padding:0 14px 10px;display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+    <div class="m-fg"><label class="m-label">From</label>
+      <input type="date" name="start_date" class="m-input" required
+             {% if last_inv_date %}min="{{ last_inv_date }}"{% endif %} /></div>
+    <div class="m-fg"><label class="m-label">To</label>
+      <input type="date" name="end_date" class="m-input" required
+             {% if last_inv_date %}min="{{ last_inv_date }}"{% endif %} /></div>
+  </div>
+
+  <!-- Constraints -->
+  <div class="m-section-lbl">Bill Constraints</div>
+  <div style="padding:0 14px 10px;">
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px;">
+      <div class="m-fg"><label class="m-label">Bills/Day Min</label>
+        <input type="number" name="min_per_day" class="m-input" value="1" min="1" /></div>
+      <div class="m-fg"><label class="m-label">Bills/Day Max</label>
+        <input type="number" name="max_per_day" class="m-input" value="3" min="1" /></div>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px;">
+      <div class="m-fg"><label class="m-label">Items/Invoice Min</label>
+        <input type="number" name="min_items" class="m-input" value="1" min="1" /></div>
+      <div class="m-fg"><label class="m-label">Items/Invoice Max</label>
+        <input type="number" name="max_items" class="m-input" value="3" min="1" /></div>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px;">
+      <div class="m-fg"><label class="m-label">Max/Bill (₹)</label>
+        <input type="number" name="max_per_bill" class="m-input" value="10000" step="100" /></div>
+      <div class="m-fg"><label class="m-label">Total Cap (₹)</label>
+        <input type="number" name="total_cap" class="m-input" value="100000" step="1000" /></div>
+    </div>
+    <div class="m-fg"><label class="m-label">Payment Mode</label>
+      <select name="payment_mode" class="m-select">
+        <option value="Cash">Cash</option>
+        <option value="Credit">Credit</option>
+        <option value="UPI">UPI</option>
+        <option value="Bank Transfer">Bank Transfer</option>
+      </select>
+    </div>
+  </div>
+
+  <div style="padding:0 14px 24px;display:flex;flex-direction:column;gap:8px;">
+    <button type="submit" name="dry_run" value="1" class="m-btn m-btn-outline"
+            style="border-color:#2563eb;color:#2563eb;">
+      <i class="bi bi-eye"></i> Preview First
+    </button>
+    <button type="submit" name="dry_run" value="0" class="m-btn m-btn-primary"
+            style="background:#dc2626;border-color:#dc2626;"
+            onclick="return confirm('Invoices generate karein?')">
+      <i class="bi bi-lightning-fill"></i> Generate Bills
+    </button>
+  </div>
+
+</form>
+
+{% else %}
+<!-- Preview -->
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;padding:14px 14px 10px;">
+  <div style="background:white;border:1px solid var(--border);border-radius:10px;padding:10px;text-align:center;">
+    <div style="font-size:20px;font-weight:800;color:var(--accent);">{{ invoice_count }}</div>
+    <div style="font-size:11px;color:var(--text-muted);">Invoices</div>
+  </div>
+  <div style="background:white;border:1px solid var(--border);border-radius:10px;padding:10px;text-align:center;">
+    <div style="font-size:18px;font-weight:800;color:#059669;">₹{{ '{:,.0f}'.format(total_amount) }}</div>
+    <div style="font-size:11px;color:var(--text-muted);">Total</div>
+  </div>
+</div>
+<div class="m-section-lbl">Preview ({{ invoice_count }} bills)</div>
+{% for inv in preview %}
+<div style="background:white;border:1px solid var(--border);border-radius:10px;padding:12px 14px;margin:0 14px 8px;display:flex;justify-content:space-between;align-items:flex-start;">
+  <div>
+    <div style="font-weight:700;font-size:13.5px;">{{ inv.buyer_name }}</div>
+    <div style="font-size:11.5px;color:var(--text-muted);margin-top:2px;">{{ inv.invoice_date }} · {{ inv.items|length }} items</div>
+    <div style="font-size:11px;color:#64748b;margin-top:2px;">
+      {% for it in inv.items %}{{ it.description }} ×{{ it.quantity }}{% if not loop.last %}, {% endif %}{% endfor %}
+    </div>
+  </div>
+  <div style="font-weight:800;color:var(--accent);font-size:14px;">₹{{ '{:,.0f}'.format(inv.grand_total) }}</div>
+</div>
+{% endfor %}
+<div style="padding:0 14px 24px;display:flex;flex-direction:column;gap:8px;margin-top:10px;">
+  <a href="{{ url_for('auto_billing') }}" class="m-btn m-btn-outline" style="justify-content:center;">
+    <i class="bi bi-arrow-left"></i> Back / Change
+  </a>
+  <form method="POST" action="{{ url_for('auto_billing') }}">
+    <input type="hidden" name="confirm_save" value="1" />
+    <button type="submit" class="m-btn m-btn-primary"
+            style="width:100%;background:#dc2626;border-color:#dc2626;justify-content:center;"
+            onclick="return confirm('{{ invoice_count }} invoices generate karein?')">
+      <i class="bi bi-lightning-fill"></i> Confirm — {{ invoice_count }} Bills Save
+    </button>
+  </form>
+</div>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+function filterProds(q) {
+  document.querySelectorAll('#prodGrid > label').forEach(el => {
+    el.style.display = (!q || el.textContent.toLowerCase().includes(q.toLowerCase())) ? '' : 'none';
+  });
+}
+function selAll() {
+  document.querySelectorAll('#prodGrid input[type=checkbox]').forEach(cb => {
+    cb.checked = true;
+    cb.closest('label').style.borderColor = 'var(--accent)';
+    cb.closest('label').style.background = '#eff6ff';
+  });
+}
+function selNone() {
+  document.querySelectorAll('#prodGrid input[type=checkbox]').forEach(cb => {
+    cb.checked = false;
+    cb.closest('label').style.borderColor = 'var(--border)';
+    cb.closest('label').style.background = 'white';
+  });
+}
+// Init checked styles
+document.querySelectorAll('#prodGrid input:checked').forEach(cb => {
+  cb.closest('label').style.borderColor = 'var(--accent)';
+  cb.closest('label').style.background = '#eff6ff';
+});
+</script>
+{% endblock %}

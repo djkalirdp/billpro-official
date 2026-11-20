@@ -90,7 +90,7 @@
   /* Item inputs */
   .item-input {
     width: 100%;
-    padding: 30px 10px;
+    padding: 7px 10px;
     border: 1.5px solid transparent;
     border-radius: 7px;
     font-family: var(--font-body);
@@ -473,7 +473,8 @@ const allBuyers = {{ buyers | tojson }};
 
 // ── Init ────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
-  addItemRow();
+  // Start with four ready-to-use item lines for faster invoice entry.
+  for (let i = 0; i < 4; i++) addItemRow();
 });
 
 // ── Billing Mode ────────────────────────────────────────────────────────
@@ -904,7 +905,8 @@ function clearForm() {
   if (!confirm('Clear all fields?')) return;
   document.getElementById('itemsBody').innerHTML = '';
   rowCount = 0;
-  addItemRow();
+  // Keep the same four-row starting layout after clearing the form.
+  for (let i = 0; i < 4; i++) addItemRow();
   document.getElementById('buyerNameInput').value  = '';
   document.getElementById('buyerGstin').value      = '';
   document.getElementById('buyerAddress').value    = '';

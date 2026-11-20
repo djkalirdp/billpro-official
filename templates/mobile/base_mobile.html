@@ -473,6 +473,9 @@
         <a href="{{ url_for('proforma_list') }}" class="more-tile {% if 'proforma' in request.endpoint %}active{% endif %}">
           <i class="bi bi-file-earmark-text" style="color:#7c3aed;"></i><span>Quotations</span>
         </a>
+        <a href="{{ url_for('auto_billing') }}" class="more-tile {% if request.endpoint == 'auto_billing' %}active{% endif %}">
+          <i class="bi bi-lightning-fill" style="color:#dc2626;"></i><span>Auto Billing</span>
+        </a>
         <a href="{{ url_for('credit_notes') }}" class="more-tile {% if 'credit_note' in request.endpoint %}active{% endif %}">
           <i class="bi bi-arrow-return-left" style="color:#7c3aed;"></i><span>Credit Notes</span>
         </a>

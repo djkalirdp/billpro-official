@@ -144,6 +144,43 @@
             </span>
           </div>
 
+          <!-- Auto Billing Toggle -->
+          <div style="margin-top:4px;">
+            <label style="display:block;font-size:12px;font-weight:700;color:var(--text-muted);
+                          text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px;">
+              Auto Billing
+            </label>
+            <div style="display:flex;align-items:center;gap:14px;padding:14px 16px;
+                        background:#f0fdf4;border:1.5px solid #a7f3d0;border-radius:10px;
+                        cursor:pointer;" onclick="document.getElementById('ab_toggle').click()">
+              <div style="flex:1;">
+                <div style="font-weight:700;font-size:13.5px;color:#065f46;">
+                  <i class="bi bi-lightning-fill me-2" style="color:#059669;"></i>
+                  Auto Billing Enable
+                </div>
+                <div style="font-size:12px;color:#6b7280;margin-top:2px;">
+                  Enable karein taaki yah buyer Auto Billing generator mein use ho
+                </div>
+              </div>
+              <!-- Toggle switch -->
+              <div style="position:relative;width:48px;height:26px;flex-shrink:0;">
+                <input type="checkbox" name="auto_billing" id="ab_toggle" value="1"
+                       {{ 'checked' if buyer and buyer.get('auto_billing') else '' }}
+                       style="opacity:0;width:0;height:0;position:absolute;" />
+                <div id="ab_track"
+                     style="position:absolute;inset:0;border-radius:99px;
+                            background:{{ '#059669' if buyer and buyer.get('auto_billing') else '#d1d5db' }};
+                            transition:background .2s;cursor:pointer;">
+                  <div id="ab_thumb"
+                       style="position:absolute;top:3px;
+                              left:{{ '22px' if buyer and buyer.get('auto_billing') else '3px' }};
+                              width:20px;height:20px;border-radius:50%;background:white;
+                              transition:left .2s;box-shadow:0 1px 4px rgba(0,0,0,.3);"></div>
+                </div>
+              </div>
+            </div>
+          </div>
+
         </div>
       </div>
     </div>
@@ -170,6 +207,17 @@ document.getElementById('buyerForm').addEventListener('submit', function() {
   const btn = document.getElementById('submitBtn');
   btn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>Saving...';
   btn.disabled = true;
+});
+document.getElementById('ab_toggle')?.addEventListener('change', function() {
+  const track = document.getElementById('ab_track');
+  const thumb = document.getElementById('ab_thumb');
+  if (this.checked) {
+    track.style.background = '#059669';
+    thumb.style.left = '20px';
+  } else {
+    track.style.background = '#d1d5db';
+    thumb.style.left = '2px';
+  }
 });
 </script>
 {% endblock %}

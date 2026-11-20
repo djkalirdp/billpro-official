@@ -426,6 +426,15 @@
              class="btn-primary-custom" style="justify-content:center;" target="_blank">
             <i class="bi bi-download"></i> Download PDF
           </a>
+          <a href="{{ url_for('whatsapp_invoice', invoice_id=invoice.id) }}"
+             class="btn-success-custom" style="justify-content:center;">
+            <i class="bi bi-whatsapp"></i> Share on WhatsApp
+          </a>
+          <form method="post" action="{{ url_for('duplicate_invoice', invoice_id=invoice.id) }}">
+            <button type="submit" class="btn-outline-custom" style="justify-content:center;width:100%;" {% if is_cancelled %}disabled{% endif %}>
+              <i class="bi bi-copy"></i> Duplicate Invoice
+            </button>
+          </form>
           {% endif %}
 
           <a href="{{ url_for('buyer_ledger', buyer_id=invoice.buyer_id) }}"

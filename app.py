@@ -65,6 +65,12 @@ from datetime import datetime, timedelta
 import json
 import os
 import io
+import re
+import sqlite3
+import zipfile
+import tempfile
+import shutil
+from urllib.parse import quote
 from werkzeug.utils import secure_filename
 
 import database_manager as db
@@ -160,6 +166,7 @@ def log_error(action, error, user=None):
     logger.error(f"USER={u} | ACTION={action} | ERROR={error}")
 
 app = Flask(__name__)
+app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # backup uploads capped at 100 MB
 app.secret_key = os.environ.get('SECRET_KEY', 'billing-app-secret-2025-change-this')
 
 # Register custom Jinja2 filter
@@ -754,6 +761,75 @@ def download_invoice_pdf(invoice_id):
     return pdf_generator.get_pdf_response(pdf_bytes, filename)
 
 
+@app.route('/invoices/<int:invoice_id>/duplicate', methods=['POST'])
+@login_required
+def duplicate_invoice(invoice_id):
+    """Create a fresh, unpaid invoice from an existing invoice."""
+    original, old_items = db.get_full_invoice_details(invoice_id)
+    if not original or '[CANCELLED]' in str(original.get('invoice_no', '')):
+        flash('A cancelled or missing invoice cannot be duplicated.', 'warning')
+        return redirect(url_for('invoices'))
+    if not old_items:
+        flash('This invoice has no line items to duplicate.', 'warning')
+        return redirect(url_for('view_invoice', invoice_id=invoice_id))
+    settings = load_settings()
+    prefix = settings.get('invoice_settings', {}).get('invoice_prefix', 'INV-')
+    items = []
+    for item in old_items:
+        items.append({k: item.get(k) for k in ('product_id','variation_id','description','hsn','gst_rate','quantity','rate','discount_percent','amount','batch_no')})
+    subtotal = round(sum(float(i.get('quantity') or 0) * float(i.get('rate') or 0) for i in items), 2)
+    discount = round(sum(float(i.get('quantity') or 0) * float(i.get('rate') or 0) * float(i.get('discount_percent') or 0) / 100 for i in items), 2)
+    taxable = round(sum(float(i.get('amount') or 0) for i in items), 2)
+    gst = round(sum(float(i.get('amount') or 0) * float(i.get('gst_rate') or 0) / 100 for i in items), 2)
+    buyer = db.get_by_id('buyers', original.get('buyer_id')) or {}
+    inter = (buyer.get('state') or get_company_state()).strip().casefold() != get_company_state().strip().casefold()
+    freight = float(original.get('freight') or 0)
+    raw_total = taxable + gst + freight
+    inv_data = {
+        'invoice_no': db.get_next_invoice_number(prefix),
+        'invoice_date': datetime.now().strftime('%Y-%m-%d'),
+        'buyer_id': original.get('buyer_id'),
+        'payment_mode': original.get('payment_mode') or 'Cash',
+        'order_ref': original.get('order_ref') or '',
+        'dispatch_info': original.get('dispatch_info') or '',
+        'subtotal': subtotal, 'total_discount': discount, 'taxable_value': taxable,
+        'total_gst': gst, 'total_cgst': 0 if inter else round(gst/2, 2),
+        'total_sgst': 0 if inter else round(gst/2, 2), 'total_igst': gst if inter else 0,
+        'freight': freight, 'round_off': round(round(raw_total)-raw_total, 2),
+        'grand_total': round(raw_total), 'paid_amount': 0,
+        'previous_balance': db.get_buyer_current_balance(original.get('buyer_id')),
+    }
+    new_id = db.save_invoice(inv_data, items, get_company_state())
+    if not new_id:
+        flash('Could not duplicate invoice. Check available stock and try again.', 'danger')
+        return redirect(url_for('view_invoice', invoice_id=invoice_id))
+    log_activity('INVOICE_DUPLICATE', f"Source={original['invoice_no']} New={inv_data['invoice_no']}")
+    flash(f"Created new invoice {inv_data['invoice_no']}. It is unpaid and stock has been deducted.", 'success')
+    return redirect(url_for('view_invoice', invoice_id=new_id))
+
+
+@app.route('/invoices/<int:invoice_id>/whatsapp')
+@login_required
+def whatsapp_invoice(invoice_id):
+    """Open WhatsApp with invoice details; user attaches the downloaded PDF."""
+    inv, _ = db.get_full_invoice_details(invoice_id)
+    if not inv or '[CANCELLED]' in str(inv.get('invoice_no', '')):
+        flash('Invoice not found or cancelled.', 'warning')
+        return redirect(url_for('invoices'))
+    phone = re.sub(r'\D', '', str(inv.get('buyer_phone') or ''))
+    if len(phone) == 10:
+        phone = '91' + phone
+    if not 10 <= len(phone) <= 15:
+        flash('Add a valid buyer mobile number (with country code) before sharing.', 'warning')
+        return redirect(url_for('view_invoice', invoice_id=invoice_id))
+    message = (f"Hello {inv.get('buyer_name') or 'Customer'}, please find your invoice "
+               f"{inv.get('invoice_no')} dated {inv.get('invoice_date')}. "
+               f"Total: ₹{float(inv.get('grand_total') or 0):,.2f}. "
+               "I will attach the invoice PDF here. Thank you.")
+    log_activity('INVOICE_WHATSAPP_OPEN', f"Invoice={inv['invoice_no']}")
+    return redirect(f"https://wa.me/{phone}?text={quote(message)}")
+
+
 @app.route('/invoices/<int:invoice_id>/cancel', methods=['POST'])
 @admin_required
 def cancel_invoice(invoice_id):
@@ -1083,6 +1159,7 @@ def add_buyer():
             'state'          : f.get('state', ''),
             'opening_balance': ob,
             'credit_limit'   : cl,
+            'auto_billing'   : 1 if f.get('auto_billing') else 0,
         })
         if result:
             flash('Buyer added successfully!', 'success')
@@ -1122,6 +1199,7 @@ def edit_buyer(buyer_id):
             'state'          : f.get('state', ''),
             'opening_balance': ob,
             'credit_limit'   : cl,
+            'auto_billing'   : 1 if f.get('auto_billing') else 0,
         })
         flash('Buyer updated successfully!', 'success')
         return redirect(url_for('buyers'))
@@ -1309,6 +1387,274 @@ def edit_manual_sale(payment_id):
         flash('Invalid amount.', 'danger')
     return redirect(url_for('buyer_ledger', buyer_id=buyer_id,
                              start=f.get('start'), end=f.get('end')))
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  AUTO BILLING — Bulk Random Invoice Generator
+# ═══════════════════════════════════════════════════════════════════
+
+@app.route('/auto-billing', methods=['GET', 'POST'])
+@admin_required
+def auto_billing():
+    """Auto billing form and generator."""
+    import random
+    from datetime import date as _date, timedelta
+
+    products = db.get_all('products')
+    buyers   = db.get_auto_billing_buyers()
+
+    # ── Confirm from preview — just save session invoices ──────
+    if request.method == 'POST' and request.form.get('confirm_save') == '1':
+        import json as _json
+        inv_json = session.get('auto_billing_preview')
+        if not inv_json:
+            flash('Preview expired — please regenerate.', 'danger')
+            return redirect(url_for('auto_billing'))
+        all_invoices = _json.loads(inv_json)
+        # Already sorted from preview — but sort again to be safe
+        all_invoices.sort(key=lambda x: x['invoice_date'])
+        inv_numbers  = db.get_next_invoice_number_bulk(len(all_invoices))
+        for inv, num in zip(all_invoices, inv_numbers):
+            inv['invoice_no'] = num
+        success, errors = db.bulk_create_invoices(all_invoices)
+        session.pop('auto_billing_preview', None)
+        log_activity('AUTO_BILLING',
+                     f"Generated={success} Errors={len(errors)}")
+        if errors:
+            flash(f'{success} invoices saved. Errors: {"; ".join(errors[:3])}', 'warning')
+        else:
+            total = sum(i['grand_total'] for i in all_invoices)
+            flash(f'✅ {success} invoices generated! Total: ₹{total:,.2f}', 'success')
+        return redirect(url_for('invoices'))
+
+    if request.method == 'GET':
+        session.pop('auto_billing_preview', None)
+        last_inv_date = db.get_last_invoice_date()
+        return mrender('auto_billing.html',
+                       products=products, buyers=buyers,
+                       last_inv_date=last_inv_date)
+
+    # ── POST: Generate/preview invoices ─────────────────────────
+    f = request.form
+    try:
+        product_ids   = [int(x) for x in f.getlist('product_ids')]
+        start_date    = f.get('start_date', '')
+        end_date      = f.get('end_date', '')
+        min_per_day   = int(f.get('min_per_day', 1))
+        max_per_day   = int(f.get('max_per_day', 3))
+        min_items     = int(f.get('min_items', 1))
+        max_items     = int(f.get('max_items', 3))
+        max_per_bill  = float(f.get('max_per_bill', 10000))
+        total_cap     = float(f.get('total_cap', 100000))
+        payment_mode  = f.get('payment_mode', 'Cash')
+        dry_run       = f.get('dry_run', '0') == '1'
+    except (ValueError, TypeError) as e:
+        flash(f'Invalid input: {e}', 'danger')
+        return redirect(url_for('auto_billing'))
+
+    if not product_ids:
+        flash('Kam se kam ek product select karein.', 'danger')
+        return redirect(url_for('auto_billing'))
+    if not buyers:
+        flash('Koi bhi buyer auto-billing ke liye enabled nahi hai.', 'danger')
+        return redirect(url_for('auto_billing'))
+    if not start_date or not end_date:
+        flash('Date range select karein.', 'danger')
+        return redirect(url_for('auto_billing'))
+
+    # Get product details
+    selected_products = [p for p in products if p['id'] in product_ids]
+    if not selected_products:
+        flash('Selected products not found.', 'danger')
+        return redirect(url_for('auto_billing'))
+
+    # Build date list
+    try:
+        d_start = _date.fromisoformat(start_date)
+        d_end   = _date.fromisoformat(end_date)
+    except ValueError:
+        flash('Invalid dates.', 'danger')
+        return redirect(url_for('auto_billing'))
+
+    date_list = []
+    cur = d_start
+    while cur <= d_end:
+        date_list.append(cur.isoformat())
+        cur += timedelta(days=1)
+
+    # Collect invoices.  Every line stores its taxable amount in `amount`,
+    # matching normal invoices; line_total is used only for cap calculations.
+    all_invoices = []
+    total_so_far = 0.0
+    company_state = (get_company_state() or '').strip().casefold()
+
+    def refresh_auto_line(item, quantity=None):
+        """Recalculate a generated line from quantity/rate/GST without drift."""
+        qty = item['quantity'] if quantity is None else quantity
+        taxable = round(qty * item['rate'], 2)
+        gst_amount = round(taxable * item['gst_rate'] / 100, 2)
+        if item['is_igst']:
+            cgst = sgst = 0.0
+            igst = gst_amount
+        else:
+            cgst = round(gst_amount / 2, 2)
+            sgst = round(gst_amount - cgst, 2)
+            igst = 0.0
+        item.update(
+            quantity=qty, taxable=taxable, amount=taxable,
+            cgst=cgst, sgst=sgst, igst=igst,
+            line_total=round(taxable + cgst + sgst + igst, 2),
+        )
+
+    for day in date_list:
+        if total_so_far >= total_cap:
+            break
+        num_bills = random.randint(min_per_day, max_per_day)
+        for _ in range(num_bills):
+            if total_so_far >= total_cap:
+                break
+
+            buyer = random.choice(buyers)
+            buyer_state = (buyer.get('state') or get_company_state() or '').strip().casefold()
+            is_igst = buyer_state != company_state
+            num_items = random.randint(min_items, max_items)
+            prods_for_bill = random.sample(
+                selected_products,
+                min(num_items, len(selected_products))
+            )
+
+            items = []
+            for prod in prods_for_bill:
+                qty = random.randint(1, 5)
+                rate = float(prod.get('selling_price') or prod.get('rate') or 100)
+                gst = float(prod.get('gst_rate') or 0)
+                if rate <= 0 or qty <= 0:
+                    continue
+                item = {
+                    'product_id': prod['id'],
+                    'description': prod['name'],
+                    'hsn': prod.get('hsn', ''),
+                    'gst_rate': gst,
+                    'quantity': qty,
+                    'rate': rate,
+                    'is_igst': is_igst,
+                }
+                refresh_auto_line(item)
+                items.append(item)
+
+            if not items:
+                continue
+
+            # Enforce per-invoice cap by removing lines, then reducing the
+            # final line in whole units. Never leave tax/amounts stale.
+            while sum(i['line_total'] for i in items) > max_per_bill and len(items) > 1:
+                items.pop()
+            if sum(i['line_total'] for i in items) > max_per_bill:
+                it = items[0]
+                allowed_qty = int(max_per_bill / (it['rate'] * (1 + it['gst_rate'] / 100))) if it['rate'] > 0 else 0
+                if allowed_qty < 1:
+                    continue
+                refresh_auto_line(it, min(it['quantity'], allowed_qty))
+                if it['line_total'] > max_per_bill:
+                    continue
+
+            # Total cap is a gross (tax-inclusive) cap. Keep rounded invoice
+            # totals within the remaining cap; trim whole units from the end.
+            remaining = total_cap - total_so_far
+            max_raw_for_rounded_cap = min(remaining, int(remaining) + 0.499999)
+            while items and sum(i['line_total'] for i in items) > max_raw_for_rounded_cap:
+                last = items[-1]
+                other_total = sum(i['line_total'] for i in items[:-1])
+                available = max_raw_for_rounded_cap - other_total
+                allowed_qty = int(available / (last['rate'] * (1 + last['gst_rate'] / 100))) if available > 0 else 0
+                if allowed_qty >= 1:
+                    refresh_auto_line(last, min(last['quantity'], allowed_qty))
+                    if last['line_total'] <= available:
+                        break
+                items.pop()
+            if not items:
+                continue
+
+            gross_total = round(sum(i['line_total'] for i in items), 2)
+            grand_round = round(gross_total)
+            if grand_round > remaining:
+                continue
+            taxable_total = round(sum(i['taxable'] for i in items), 2)
+            total_cgst = round(sum(i['cgst'] for i in items), 2)
+            total_sgst = round(sum(i['sgst'] for i in items), 2)
+            total_igst = round(sum(i['igst'] for i in items), 2)
+            total_gst = round(total_cgst + total_sgst + total_igst, 2)
+            round_off = round(grand_round - gross_total, 2)
+
+            # Internal calculation fields are not persisted as invoice items.
+            persisted_items = [
+                {k: v for k, v in item.items() if k not in ('is_igst', 'line_total')}
+                for item in items
+            ]
+            all_invoices.append({
+                'invoice_date': day,
+                'buyer_id': buyer['id'],
+                'buyer_name': buyer['name'],
+                'items': persisted_items,
+                'taxable_value': taxable_total,
+                'total_gst': total_gst,
+                'total_cgst': total_cgst,
+                'total_sgst': total_sgst,
+                'total_igst': total_igst,
+                'grand_total': grand_round,
+                'round_off': round_off,
+                'freight': 0,
+                'payment_mode': payment_mode,
+                'paid_amount': grand_round if payment_mode != 'Credit' else 0,
+            })
+            total_so_far += grand_round
+
+    if not all_invoices:
+        flash('Koi invoice generate nahi hua — constraints check karein.', 'warning')
+        return redirect(url_for('auto_billing'))
+
+    if dry_run:
+        # Sort by date so preview shows chronological order
+        all_invoices.sort(key=lambda x: x['invoice_date'])
+        import json as _json
+        session['auto_billing_preview'] = _json.dumps(all_invoices)
+        last_inv_date = db.get_last_invoice_date()
+        return mrender('auto_billing.html',
+                       products=products, buyers=buyers,
+                       preview=all_invoices,
+                       last_inv_date=last_inv_date,
+                       total_amount=round(total_so_far, 2),
+                       invoice_count=len(all_invoices))
+
+    # Sort by date before assigning numbers (ensures sequential = chronological)
+    all_invoices.sort(key=lambda x: x['invoice_date'])
+    # Direct generate (no preview)
+    inv_numbers = db.get_next_invoice_number_bulk(len(all_invoices))
+    for inv, num in zip(all_invoices, inv_numbers):
+        inv['invoice_no'] = num
+    success, errors = db.bulk_create_invoices(all_invoices)
+    log_activity('AUTO_BILLING',
+                 f"Generated={success} Errors={len(errors)} Total=₹{total_so_far:.2f}")
+    if errors:
+        flash(f'{success} invoices saved. Errors: {"; ".join(errors[:3])}', 'warning')
+    else:
+        flash(f'✅ {success} invoices generated! Total: ₹{total_so_far:,.2f}', 'success')
+    return redirect(url_for('invoices'))
+
+
+@app.route('/buyers/<int:buyer_id>/toggle-auto-billing', methods=['POST'])
+@admin_required
+def toggle_auto_billing(buyer_id):
+    """Toggle auto_billing flag for a buyer."""
+    buyer = db.get_by_id('buyers', buyer_id)
+    if not buyer:
+        return jsonify({'success': False})
+    new_val = 0 if buyer.get('auto_billing', 0) else 1
+    db.execute_query(
+        "UPDATE buyers SET auto_billing = ? WHERE id = ?",
+        (new_val, buyer_id)
+    )
+    return jsonify({'success': True, 'auto_billing': new_val})
 
 # ─────────────────────────────────────────────
 #  VENDORS  (Admin only)
@@ -1799,6 +2145,196 @@ def purchase_payments_json(purchase_id):
 # ─────────────────────────────────────────────
 #  SETTINGS  (Admin only)
 # ─────────────────────────────────────────────
+@app.route('/stock-adjustments', methods=['GET', 'POST'])
+@admin_required
+def stock_adjustments():
+    if request.method == 'POST':
+        try:
+            stock_item = request.form.get('stock_item', '')
+            if stock_item.startswith('variation:'):
+                _, variation_id, product_id = stock_item.split(':', 2)
+            elif stock_item.startswith('product:'):
+                _, product_id = stock_item.split(':', 1)
+                variation_id = None
+            else:
+                raise ValueError('Select a valid product or variation.')
+            ok, result = db.adjust_stock(product_id, request.form.get('quantity'),
+                request.form.get('adjustment_type'), request.form.get('reason'),
+                variation_id=variation_id, created_by=session.get('username', ''))
+        except (TypeError, ValueError):
+            ok, result = False, 'Enter a valid product/variation and quantity.'
+        if ok:
+            log_activity('STOCK_ADJUSTMENT', f"StockItem={request.form.get('stock_item')} Type={request.form.get('adjustment_type')} Qty={request.form.get('quantity')}")
+            flash(f'Stock updated. New quantity: {float(result):g}', 'success')
+        else:
+            flash(str(result), 'danger')
+        return redirect(url_for('stock_adjustments'))
+    products = db.get_all('products')
+    for product in products:
+        product['variations'] = db.get_variations(product['id'])
+    return mrender('stock_adjustments.html', products=products, adjustments=db.get_stock_adjustments())
+
+@app.route('/expenses', methods=['GET', 'POST'])
+@admin_required
+def expenses():
+    if request.method == 'POST':
+        try:
+            data = {
+                'expense_date': request.form.get('expense_date', '').strip(),
+                'category': request.form.get('category', '').strip(),
+                'description': request.form.get('description', '').strip(),
+                'amount': round(float(request.form.get('amount') or 0), 2),
+                'payment_mode': request.form.get('payment_mode', 'Cash'),
+                'reference_no': request.form.get('reference_no', '').strip(),
+                'notes': request.form.get('notes', '').strip(),
+                'created_by': session.get('username', '')
+            }
+            expense_id = db.add_expense(data)
+        except (TypeError, ValueError):
+            expense_id = None
+        if expense_id:
+            log_activity('EXPENSE_CREATE', f"Category={data['category']} Amount={data['amount']}")
+            flash('Expense saved.', 'success')
+        else:
+            flash('Enter a valid date, category, description and positive amount.', 'danger')
+        return redirect(url_for('expenses'))
+    start = request.args.get('start', datetime.now().replace(day=1).strftime('%Y-%m-%d'))
+    end = request.args.get('end', datetime.now().strftime('%Y-%m-%d'))
+    rows = db.get_expenses(start, end)
+    return mrender('expenses.html', expenses=rows, start=start, end=end,
+                   total=sum(float(x.get('amount') or 0) for x in rows), today=datetime.now().strftime('%Y-%m-%d'))
+
+
+@app.route('/expenses/<int:expense_id>/delete', methods=['POST'])
+@admin_required
+def delete_expense(expense_id):
+    if db.execute_query('DELETE FROM expenses WHERE id=?', (expense_id,), commit=True) is not None:
+        log_activity('EXPENSE_DELETE', f'ExpenseID={expense_id}')
+        flash('Expense deleted.', 'success')
+    else:
+        flash('Expense could not be deleted.', 'danger')
+    return redirect(url_for('expenses'))
+
+
+def _make_backup_archive():
+    """Create a transactionally consistent database + settings backup ZIP."""
+    os.makedirs(db.BACKUP_DIR, exist_ok=True)
+    stamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    fd, temp_db = tempfile.mkstemp(suffix='.db'); os.close(fd)
+    try:
+        src = sqlite3.connect(db.DB_FILE); dst = sqlite3.connect(temp_db)
+        try:
+            src.backup(dst); dst.commit()
+        finally:
+            dst.close(); src.close()
+        archive = os.path.join(db.BACKUP_DIR, f'BillPro_backup_{stamp}.zip')
+        with zipfile.ZipFile(archive, 'w', zipfile.ZIP_DEFLATED) as zf:
+            zf.write(temp_db, 'billpro.db')
+            if os.path.exists(SETTINGS_FILE): zf.write(SETTINGS_FILE, 'settings.json')
+            zf.writestr('BACKUP_INFO.txt', f'BillPro backup created {datetime.now().isoformat()}\n')
+        return archive
+    finally:
+        if os.path.exists(temp_db): os.remove(temp_db)
+
+
+@app.route('/backups', methods=['GET', 'POST'])
+@admin_required
+def backups():
+    if request.method == 'POST':
+        try:
+            archive = _make_backup_archive()
+            flash('Backup created successfully.', 'success')
+            return send_file(archive, as_attachment=True, download_name=os.path.basename(archive))
+        except Exception as exc:
+            logger.exception('Backup creation failed')
+            flash(f'Backup failed: {exc}', 'danger')
+    files = sorted([f for f in os.listdir(db.BACKUP_DIR) if f.lower().endswith(('.zip', '.db'))], reverse=True)
+    return mrender('backups.html', backup_files=files)
+
+
+@app.route('/backups/download/<path:filename>')
+@admin_required
+def download_backup(filename):
+    safe = os.path.basename(filename)
+    path = os.path.join(db.BACKUP_DIR, safe)
+    if not os.path.isfile(path):
+        flash('Backup file not found.', 'danger'); return redirect(url_for('backups'))
+    return send_file(path, as_attachment=True, download_name=safe)
+
+
+@app.route('/backups/restore', methods=['POST'])
+@admin_required
+def restore_backup():
+    upload = request.files.get('backup_file')
+    if not upload or not upload.filename:
+        flash('Choose a BillPro backup ZIP or SQLite database.', 'warning'); return redirect(url_for('backups'))
+    temp_dir = tempfile.mkdtemp(prefix='billpro_restore_')
+    try:
+        incoming = os.path.join(temp_dir, secure_filename(upload.filename))
+        upload.save(incoming)
+        candidate = None; settings_candidate = None
+        if zipfile.is_zipfile(incoming):
+            with zipfile.ZipFile(incoming) as zf:
+                names = set(zf.namelist())
+                if 'billpro.db' not in names:
+                    raise ValueError('This ZIP is not a BillPro backup (billpro.db missing).')
+                if zf.getinfo('billpro.db').file_size > 500 * 1024 * 1024:
+                    raise ValueError('Backup database is larger than the 500 MB restore limit.')
+                candidate = os.path.join(temp_dir, 'billpro.db')
+                with zf.open('billpro.db') as src, open(candidate, 'wb') as dst: shutil.copyfileobj(src, dst)
+                if 'settings.json' in names:
+                    if zf.getinfo('settings.json').file_size > 2 * 1024 * 1024:
+                        raise ValueError('Backup settings file is unexpectedly large.')
+                    settings_candidate = os.path.join(temp_dir, 'settings.json')
+                    with zf.open('settings.json') as src, open(settings_candidate, 'wb') as dst: shutil.copyfileobj(src, dst)
+        elif incoming.lower().endswith(('.db', '.sqlite', '.sqlite3')):
+            candidate = incoming
+        else:
+            raise ValueError('Unsupported file. Upload a BillPro backup ZIP or .db file.')
+        check = sqlite3.connect(candidate)
+        try:
+            integrity = check.execute('PRAGMA integrity_check').fetchone()[0]
+            if integrity != 'ok': raise ValueError(f'Database integrity check failed: {integrity}')
+            required = {'invoices', 'invoice_items', 'products', 'buyers', 'users'}
+            present = {r[0] for r in check.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            if not required.issubset(present): raise ValueError('Database does not look like a BillPro database.')
+        finally: check.close()
+        # Validate settings before touching the active database.
+        if settings_candidate:
+            with open(settings_candidate, 'r', encoding='utf-8') as sf: json.load(sf)
+        # Keep a pre-restore snapshot before replacing the active database.
+        os.makedirs(db.BACKUP_DIR, exist_ok=True)
+        safety = os.path.join(db.BACKUP_DIR, f'pre_restore_{datetime.now().strftime("%Y%m%d_%H%M%S")}.db')
+        src = sqlite3.connect(db.DB_FILE); dst = sqlite3.connect(safety)
+        try:
+            src.backup(dst); dst.commit()
+            src.execute('PRAGMA wal_checkpoint(TRUNCATE)')
+        finally: dst.close(); src.close()
+        replacement = db.DB_FILE + '.restore_tmp'
+        shutil.copy2(candidate, replacement)
+        # Stale WAL sidecars must not be replayed against the restored database.
+        for suffix in ('-wal', '-shm'):
+            sidecar = db.DB_FILE + suffix
+            if os.path.exists(sidecar): os.remove(sidecar)
+        os.replace(replacement, db.DB_FILE)
+        if settings_candidate:
+            settings_replacement = SETTINGS_FILE + '.restore_tmp'
+            shutil.copy2(settings_candidate, settings_replacement)
+            os.replace(settings_replacement, SETTINGS_FILE)
+        # Bring older valid BillPro databases forward to the current schema.
+        db.create_tables()
+        log_activity('BACKUP_RESTORE', f'File={upload.filename}')
+        flash('Backup restored. Please sign in again if the restored user accounts differ.', 'success')
+        session.clear()
+        return redirect(url_for('login'))
+    except Exception as exc:
+        logger.exception('Restore failed')
+        flash(f'Restore failed; active data was not intentionally changed: {exc}', 'danger')
+        return redirect(url_for('backups'))
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
 @app.route('/settings', methods=['GET', 'POST'])
 @admin_required
 def settings():

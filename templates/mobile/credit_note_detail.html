@@ -14,6 +14,10 @@ function setCnSize(size, btn) {
 {% block page_title %}Credit Note{% endblock %}
 {% block topbar_actions %}
 <a href="{{ url_for('credit_notes') }}" class="m-icon-btn"><i class="bi bi-arrow-left"></i></a>
+<a id="cnPdfBtn" href="{{ url_for('credit_note_pdf', cn_id=cn.id) }}?size=A4"
+   class="m-icon-btn" style="color:#dc2626;" target="_blank">
+  <i class="bi bi-file-pdf"></i>
+</a>
 {% endblock %}
 {% block content %}
 <div style="background:linear-gradient(135deg,#7c3aed,#6d28d9);color:white;margin:14px 14px 10px;border-radius:var(--radius);padding:18px;">
@@ -61,4 +65,17 @@ function setCnSize(size, btn) {
     <i class="bi bi-list-ul"></i> All Credit Notes
   </a>
 </div>
+{% block scripts %}
+<script>
+function setCnSize(size, btn) {
+  document.getElementById('cnSizeRow').querySelectorAll('button').forEach(b => {
+    b.style.borderColor='var(--border)'; b.style.color='#475569'; b.style.background='white';
+  });
+  btn.style.borderColor='#7c3aed'; btn.style.color='#7c3aed'; btn.style.background='#f5f3ff';
+  const url = `/credit-notes/{{ cn.id }}/pdf?size=${size}`;
+  document.getElementById('cnPdfBtn').href = url;
+  document.getElementById('cnPdfBtnBottom').href = url;
+}
+</script>
+{% endblock %}
 {% endblock %}

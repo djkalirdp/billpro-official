@@ -520,6 +520,15 @@
       </li>
 
       <li class="nav-item">
+        <a href="{{ url_for('auto_billing') }}"
+           class="nav-link-item {% if request.endpoint == 'auto_billing' %}active{% endif %}"
+           style="{% if request.endpoint == 'auto_billing' %}{% else %}{% endif %}">
+          <i class="bi bi-lightning-fill" style="color:{% if request.endpoint == 'auto_billing' %}white{% else %}#dc2626{% endif %};"></i>
+          <span>Auto Billing</span>
+        </a>
+      </li>
+
+      <li class="nav-item">
         <a href="{{ url_for('buyers') }}"
            class="nav-link-item {% if 'buyer' in request.endpoint %}active{% endif %}">
           <i class="bi bi-people"></i>
@@ -538,6 +547,16 @@
         </a>
       </li>
 
+      <li class="nav-item">
+        <a href="{{ url_for('stock_adjustments') }}" class="nav-link-item {% if request.endpoint == 'stock_adjustments' %}active{% endif %}">
+          <i class="bi bi-sliders"></i><span>Stock Adjustment</span>
+        </a>
+      </li>
+      <li class="nav-item">
+        <a href="{{ url_for('expenses') }}" class="nav-link-item {% if request.endpoint in ['expenses','delete_expense'] %}active{% endif %}">
+          <i class="bi bi-wallet2"></i><span>Expenses</span>
+        </a>
+      </li>
       <li class="nav-item">
         <a href="{{ url_for('product_rate_list') }}"
            class="nav-link-item {% if request.endpoint == 'product_rate_list' %}active{% endif %}">
@@ -585,6 +604,12 @@
            class="nav-link-item {% if request.endpoint in ['batch_list','batch_history'] %}active{% endif %}">
           <i class="bi bi-boxes"></i>
           <span>Batch Tracker</span>
+        </a>
+      </li>
+
+      <li class="nav-item">
+        <a href="{{ url_for('backups') }}" class="nav-link-item {% if 'backup' in request.endpoint %}active{% endif %}">
+          <i class="bi bi-cloud-arrow-down"></i><span>Backup & Restore</span>
         </a>
       </li>
 
