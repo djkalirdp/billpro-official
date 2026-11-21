@@ -51,8 +51,35 @@ for /f "tokens=*" %%v in ('%PYTHON% --version 2^>^&1') do (
 timeout /t 1 /nobreak >nul
 
 :: ----------------------------------------------------------------
-:: STEP 2: DOWNLOAD ZIP
+:: STEP 2: FIND THE APP FILES (download ONLY if they are missing)
 :: ----------------------------------------------------------------
+echo.
+echo  [2/8]  App files check kar raha hoon...
+
+:: Always work from the folder install.bat is in (not from wherever cmd was opened)
+set "SELF=%~dp0"
+if "%SELF:~-1%"=="\" set "SELF=%SELF:~0,-1%"
+cd /d "%SELF%"
+
+set "FORCE_UPDATE=0"
+if /i "%~1"=="update" set "FORCE_UPDATE=1"
+
+:: Case A: whole repo was downloaded and install.bat is inside it -> use this folder
+:: Case B: otherwise use (or create) the billing-app folder next to install.bat
+set "DEST=%SELF%\billing-app"
+if exist "%SELF%\app.py" if exist "%SELF%\database_manager.py" if exist "%SELF%\templates\" set "DEST=%SELF%"
+
+if "%FORCE_UPDATE%"=="1" goto :download_files
+if exist "%DEST%\app.py" if exist "%DEST%\database_manager.py" if exist "%DEST%\templates\" goto :files_present
+goto :download_files
+
+:files_present
+echo  [2/8]  DONE - Files pehle se maujood hain, download nahi karunga
+echo         Folder: "%DEST%"
+echo         (Naya version chahiye to chalao:  install.bat update)
+goto :files_ready
+
+:download_files
 echo.
 echo  [2/8]  GitHub se files download kar raha hoon...
 echo         (Internet chahiye - 1-2 minute lag sakte hain)
@@ -88,16 +115,20 @@ for %%A in ("billing-main.zip") do (
 timeout /t 1 /nobreak >nul
 
 :: ----------------------------------------------------------------
-:: STEP 3: EXTRACT FILES
+:: STEP 3: EXTRACT FILES  (your data and settings are never overwritten)
 :: ----------------------------------------------------------------
 echo.
 echo  [3/8]  Files extract kar raha hoon...
 
-if exist "billing-main" rmdir /s /q "billing-main"
+if exist "_bp_extract" rmdir /s /q "_bp_extract"
 
-powershell -NoProfile -Command "Write-Host '         Extracting ZIP...'; Expand-Archive -Path 'billing-main.zip' -DestinationPath '.' -Force; Write-Host '         Done!'"
+powershell -NoProfile -Command "Write-Host '         Extracting ZIP...'; Expand-Archive -Path 'billing-main.zip' -DestinationPath '_bp_extract' -Force; Write-Host '         Done!'"
 
-if not exist "billing-main" (
+:: GitHub names the top folder <repo>-main (billpro-official-main), so find it instead of guessing
+set "SRC="
+for /d %%D in ("_bp_extract\*") do set "SRC=%%~fD"
+
+if not defined SRC (
     color 4F
     echo.
     echo  ERROR: Extract fail ho gaya!
@@ -107,24 +138,43 @@ if not exist "billing-main" (
     exit /b 1
 )
 
-if not exist "billing-app" mkdir "billing-app"
+:: Files that must never be replaced by the downloaded copy
+(
+    echo \data\billing_app.db
+    echo \settings.json
+    echo \static\uploads\
+    echo \install.bat
+) > "_bp_exclude.txt"
+
+if not exist "%DEST%" mkdir "%DEST%"
 
 echo         Files copy kar raha hoon...
-xcopy "billing-main\*" "billing-app\" /E /Y /Q >nul 2>&1
+xcopy "%SRC%\*" "%DEST%\" /E /Y /Q /I /EXCLUDE:_bp_exclude.txt >nul 2>&1
+if errorlevel 1 (
+    color 4F
+    echo.
+    echo  ERROR: Files copy nahi huin! Dobara chalao
+    echo.
+    pause
+    exit /b 1
+)
 
-if not exist "billing-app\data"            mkdir "billing-app\data"
-if not exist "billing-app\backups"         mkdir "billing-app\backups"
-if not exist "billing-app\invoices"        mkdir "billing-app\invoices"
-if not exist "billing-app\reports"         mkdir "billing-app\reports"
-if not exist "billing-app\static\uploads"  mkdir "billing-app\static\uploads"
-
-rmdir /s /q "billing-main"
+rmdir /s /q "_bp_extract"
+del /f /q "_bp_exclude.txt"
 del /f /q "billing-main.zip"
 
-echo  [3/8]  DONE - billing-app folder ready
+echo  [3/8]  DONE - Files ready
 
 timeout /t 1 /nobreak >nul
-cd billing-app
+
+:files_ready
+cd /d "%DEST%"
+
+if not exist "data"            mkdir "data"
+if not exist "backups"         mkdir "backups"
+if not exist "invoices"        mkdir "invoices"
+if not exist "reports"         mkdir "reports"
+if not exist "static\uploads"  mkdir "static\uploads"
 
 :: ----------------------------------------------------------------
 :: STEP 4: VIRTUAL ENVIRONMENT
@@ -269,7 +319,7 @@ echo  ================================================================
 echo.
 echo   APP START KARNE KE LIYE:
 echo.
-echo     billing-app folder mein jaao
+echo     Yeh folder kholo: "%CD%"
 echo     start.bat pe DOUBLE-CLICK karo
 echo.
 echo   Browser mein:  http://localhost:5000
@@ -293,7 +343,7 @@ if /i "%STARTNOW%"=="y" (
     venv\Scripts\python.exe app.py
 ) else (
     echo.
-    echo  Theek hai! Baad mein billing-app\start.bat double-click karna.
+    echo  Theek hai! Baad mein is folder ka start.bat double-click karna.
     echo.
 )
 
