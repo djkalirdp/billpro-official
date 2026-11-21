@@ -63,7 +63,7 @@ if exist "billing-main.zip" (
     del /f /q "billing-main.zip"
 )
 
-powershell -NoProfile -Command "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Write-Host '         Connecting to GitHub...'; Invoke-WebRequest -Uri 'https://github.com/djkalirdp/billing/archive/refs/heads/main.zip' -OutFile 'billing-main.zip' -UseBasicParsing; Write-Host '         Download complete!'"
+powershell -NoProfile -Command "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Write-Host '         Connecting to GitHub...'; Invoke-WebRequest -Uri 'https://github.com/djkalirdp/billpro-official/archive/refs/heads/main.zip' -OutFile 'billing-main.zip' -UseBasicParsing; Write-Host '         Download complete!'"
 
 if not exist "billing-main.zip" (
     color 4F

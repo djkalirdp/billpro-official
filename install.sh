@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  BILLING & INVENTORY SOFTWARE — INSTALLER
-#  PC (Linux/Mac):     bash <(curl -fsSL https://raw.githubusercontent.com/djkalirdp/billing/main/install.sh)
-#  Termux (Android):   curl -fsSL https://raw.githubusercontent.com/djkalirdp/billing/main/install.sh -o install.sh && bash install.sh
+#  PC (Linux/Mac):     bash <(curl -fsSL https://raw.githubusercontent.com/djkalirdp/billpro-official/main/install.sh)
+#  Termux (Android):   curl -fsSL https://raw.githubusercontent.com/djkalirdp/billpro-official/main/install.sh -o install.sh && bash install.sh
 # =============================================================================
 
 set -e
@@ -115,8 +115,8 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 step "Downloading from GitHub..."
 
-REPO_URL="https://github.com/djkalirdp/billing.git"
-REPO_RAW="https://raw.githubusercontent.com/djkalirdp/billing/main"
+REPO_URL="https://github.com/djkalirdp/billpro-official.git"
+REPO_RAW="https://raw.githubusercontent.com/djkalirdp/billpro-official/main"
 INSTALL_TARGET="billing-app"
 
 if command -v git &>/dev/null; then

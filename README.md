@@ -172,7 +172,7 @@ http://localhost:5000
 ### Linux / macOS
 
 ``` bash
-bash <(curl -fsSL https://raw.githubusercontent.com/djkalirdp/billing/main/install.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/djkalirdp/billpro-official/main/install.sh)
 bash start.sh
 ```
 
@@ -183,7 +183,7 @@ Then visit `http://localhost:5000`.
 Install Termux, then run:
 
 ``` bash
-curl -fsSL https://raw.githubusercontent.com/djkalirdp/billing/main/install.sh -o install.sh
+curl -fsSL https://raw.githubusercontent.com/djkalirdp/billpro-official/main/install.sh -o install.sh
 bash install.sh
 bash start.sh
 ```
@@ -207,7 +207,7 @@ http://PHONE-IP:5000
 Requirements: Python 3.8 or newer and a modern browser.
 
 ``` bash
-git clone https://github.com/djkalirdp/billing.git
+git clone https://github.com/djkalirdp/billpro-official.git
 cd billing
 
 python3 -m venv venv
